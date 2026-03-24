@@ -1,12 +1,16 @@
 import uuid
 import time
+import logging
 from datetime import datetime, timezone
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 import httpx
 
-from config import FAL_AI_KEY, MARKUP_PERCENT, QUOTE_TTL_SECONDS
+from config import FAL_AI_KEY, MARKUP_PERCENT, QUOTE_TTL_SECONDS, DEFAULT_VIDEO_MODEL, SUPPORTED_VIDEO_MODELS
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 quote_sessions = {}
@@ -29,24 +33,65 @@ def validate_generate_request(data):
         raise ValueError("duration_seconds must be between 1 and 30")
     if not isinstance(data.get("prompt"), str) or not data["prompt"].strip():
         raise ValueError("prompt must be a non-empty string")
+    model = data.get("model")
+    if model is not None:
+        if model not in SUPPORTED_VIDEO_MODELS:
+            raise ValueError(f"model must be one of: {', '.join(SUPPORTED_VIDEO_MODELS)}")
     return data
 
 
 async def get_fal_pricing(endpoint_id: str = "fal-ai/veo3.1/fast"):
     if not FAL_AI_KEY:
         return None, None
-    async with httpx.AsyncClient() as client:
-        response = await client.get(
-            "https://api.fal.ai/v1/models/pricing",
-            params={"endpoint_id": endpoint_id},
-            headers={"Authorization": f"Key {FAL_AI_KEY}"},
-            timeout=10.0,
-        )
-        response.raise_for_status()
-        data = response.json()
-        price = data.get("unit_price")
-        unit = data.get("unit", "second")
-        return price, unit
+    
+    url = "https://api.fal.ai/v1/models/pricing"
+    headers = {"Authorization": f"Key {FAL_AI_KEY}"}
+    params = {"endpoint_id": endpoint_id}
+    
+    logger.info(f"Fetching pricing from Fal.ai:")
+    logger.info(f"  URL: {url}")
+    logger.info(f"  Headers: Authorization: Key {FAL_AI_KEY[:8]}...")
+    logger.info(f"  Params: {params}")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, headers=headers, timeout=10.0)
+            
+            logger.info(f"Response status: {response.status_code}")
+            logger.info(f"Response body: {response.text}")
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to fetch pricing: HTTP {response.status_code}")
+                return None, None
+            
+            data = response.json()
+            logger.info(f"Parsed response data: {data}")
+            
+            prices = data.get("prices", [])
+            if not prices:
+                logger.error(f"No pricing information returned for endpoint: {endpoint_id}")
+                return None, None
+            
+            # Find the price for our specific endpoint_id
+            price_info = next(
+                (p for p in prices if p.get("endpoint_id") == endpoint_id),
+                prices[0]  # Fallback to first if not found
+            )
+            price = price_info.get("unit_price")
+            unit = price_info.get("unit", "second")
+            
+            logger.info(f"Extracted pricing: price={price}, unit={unit}")
+            return price, unit
+            
+    except httpx.TimeoutException as e:
+        logger.error(f"Timeout fetching pricing from Fal.ai: {e}")
+        return None, None
+    except httpx.RequestError as e:
+        logger.error(f"Request error fetching pricing from Fal.ai: {e}")
+        return None, None
+    except Exception as e:
+        logger.error(f"Unexpected error fetching pricing from Fal.ai: {e}")
+        return None, None
 
 
 def calculate_final_price(fal_price: float) -> float:
@@ -106,11 +151,21 @@ async def generate_video(request):
             "error": str(e),
         }, status_code=400)
 
-    fal_price, unit = await get_fal_pricing()
+    model = data.get("model", DEFAULT_VIDEO_MODEL)
+    fal_price, unit = await get_fal_pricing(model)
     if fal_price is None:
+        logger.error("Failed to fetch pricing from Fal.ai - returning 503")
         return JSONResponse({
             "success": False,
             "error": "Unable to fetch pricing from Fal.ai",
+            "details": {
+                "endpoint_id": model,
+                "possible_causes": [
+                    "Invalid or missing FAL_AI_KEY",
+                    "Fal.ai API is temporarily unavailable",
+                    "Network connectivity issue",
+                ],
+            },
         }, status_code=503)
 
     duration = data["duration_seconds"]
@@ -121,6 +176,7 @@ async def generate_video(request):
     quote_sessions[session_id] = {
         "prompt": data["prompt"],
         "duration_seconds": duration,
+        "model": model,
         "fal_price_per_unit": fal_price,
         "unit": unit,
         "final_price_total": final_price_total,
@@ -133,12 +189,13 @@ async def generate_video(request):
         "error": "Payment required",
         "session_id": session_id,
         "pricing": {
-            "fal_price_per_unit": fal_price,
+            "model": model,
+            "price_per_unit": fal_price,
             "unit": unit,
             "duration_seconds": duration,
             "subtotal_usd": fal_total,
             "markup_percent": MARKUP_PERCENT,
-            "final_price_total": final_price_total,
+            "final_price_total": round(final_price_total, 2),
         },
         "expires_in_seconds": QUOTE_TTL_SECONDS,
     }, status_code=402)

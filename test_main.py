@@ -1,11 +1,12 @@
 import pytest
 import time
 import uuid
+import os
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from httpx import AsyncClient
 from main import app, quote_sessions, cleanup_expired_sessions, calculate_final_price, verify_payment_credential, get_fal_pricing
-from config import MARKUP_PERCENT, QUOTE_TTL_SECONDS
+from config import MARKUP_PERCENT, QUOTE_TTL_SECONDS, SUPPORTED_VIDEO_MODELS, DEFAULT_VIDEO_MODEL
 
 
 @pytest.fixture
@@ -62,13 +63,13 @@ class TestVideoGenerationWithoutPayment:
         )
         data = response.json()
         pricing = data["pricing"]
-        assert "fal_price_per_unit" in pricing
-        assert pricing["fal_price_per_unit"] == 0.05
+        assert "price_per_unit" in pricing
+        assert pricing["price_per_unit"] == 0.05
         assert pricing["unit"] == "second"
         assert pricing["duration_seconds"] == 10
         assert pricing["subtotal_usd"] == 0.50
         assert pricing["markup_percent"] == MARKUP_PERCENT
-        assert pricing["final_price_total"] == 0.50 * (1 + MARKUP_PERCENT / 100)
+        assert pricing["final_price_total"] == round(0.50 * (1 + MARKUP_PERCENT / 100), 2)
 
 
 class TestVideoGenerationWithPayment:
@@ -425,7 +426,11 @@ class TestFalPricingAPIMocking:
     async def test_get_fal_pricing_success(self):
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"unit_price": 0.08, "unit": "second"}
+        mock_response.json.return_value = {
+            "prices": [
+                {"endpoint_id": "fal-ai/veo3.1/fast", "unit_price": 0.08, "unit": "second"}
+            ]
+        }
 
         async def mock_get(*args, **kwargs):
             return mock_response
@@ -467,8 +472,8 @@ class TestFalPricingAPIMocking:
 
         with patch("httpx.AsyncClient", return_value=mock_client):
             price, unit = await get_fal_pricing()
-            assert price == 0.10
-            assert unit == "second"
+            assert price is None
+            assert unit is None
 
     @pytest.mark.asyncio
     async def test_get_fal_pricing_exception(self):
@@ -488,14 +493,18 @@ class TestFalPricingAPIMocking:
 
         with patch("httpx.AsyncClient", return_value=mock_client):
             price, unit = await get_fal_pricing()
-            assert price == 0.10
-            assert unit == "second"
+            assert price is None
+            assert unit is None
 
     @pytest.mark.asyncio
     async def test_get_fal_pricing_missing_unit_price(self):
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"unit": "second"}
+        mock_response.json.return_value = {
+            "prices": [
+                {"endpoint_id": "fal-ai/veo3.1/fast", "unit": "second"}
+            ]
+        }
 
         async def mock_get(*args, **kwargs):
             return mock_response
@@ -513,15 +522,15 @@ class TestFalPricingAPIMocking:
 
         with patch("httpx.AsyncClient", return_value=mock_client):
             price, unit = await get_fal_pricing()
-            assert price == 0.10
+            assert price is None
             assert unit == "second"
 
     @pytest.mark.asyncio
     async def test_get_fal_pricing_no_api_key(self):
         with patch("main.FAL_AI_KEY", ""):
             price, unit = await get_fal_pricing()
-            assert price == 0.10
-            assert unit == "second"
+            assert price is None
+            assert unit is None
 
 
 class TestEdgeCases:
@@ -589,3 +598,42 @@ class TestEdgeCases:
         assert response.status_code == 402
         data = response.json()
         assert "session_id" in data
+
+
+class TestModelSelection:
+    @pytest.mark.asyncio
+    async def test_request_without_model_uses_default(self, client, mock_fal_pricing):
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "A beautiful sunset", "duration_seconds": 5}
+        )
+        assert response.status_code == 402
+        data = response.json()
+        pricing = data["pricing"]
+        assert pricing["model"] == DEFAULT_VIDEO_MODEL
+        assert pricing["price_per_unit"] == 0.05
+
+    @pytest.mark.asyncio
+    async def test_request_with_invalid_model_returns_400(self, client, mock_fal_pricing):
+        invalid_model = "invalid-model-xyz"
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "A beautiful sunset", "duration_seconds": 5, "model": invalid_model}
+        )
+        assert response.status_code == 400
+        data = response.json()
+        assert data["success"] is False
+        assert "model" in data["error"].lower() or "supported" in data["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_default_model_configurable_via_env(self, client, mock_fal_pricing):
+        custom_default = "fal-ai/veo3.1"
+        with patch("main.DEFAULT_VIDEO_MODEL", custom_default):
+            response = await client.post(
+                "/api/video/generate",
+                json={"prompt": "A beautiful sunset", "duration_seconds": 5}
+            )
+            assert response.status_code == 402
+            data = response.json()
+            pricing = data["pricing"]
+            assert pricing["model"] == custom_default
