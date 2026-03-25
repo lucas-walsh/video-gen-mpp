@@ -5,7 +5,7 @@ import os
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from httpx import AsyncClient
-from main import app, quote_sessions, cleanup_expired_sessions, calculate_final_price, verify_payment_credential, get_fal_pricing
+from main import app, quote_sessions, cleanup_expired_sessions, calculate_final_price, verify_payment_credential, get_fal_pricing, jobs_db, last_poll_time, submit_to_fal, fetch_fal_job_status, fetch_fal_job_result
 from config import MARKUP_PERCENT, QUOTE_TTL_SECONDS, SUPPORTED_VIDEO_MODELS, DEFAULT_VIDEO_MODEL
 
 
@@ -20,6 +20,28 @@ async def client():
 def mock_fal_pricing():
     with patch("main.get_fal_pricing", new_callable=AsyncMock) as mock:
         mock.return_value = (0.05, "second")
+        yield mock
+
+
+@pytest.fixture
+def mock_submit_to_fal():
+    with patch("main.submit_to_fal", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "request_id": "req_test123",
+            "status": "IN_PROGRESS",
+            "status_url": "https://queue.fal.run/fal-ai/veo3.1/fast/requests/req_test123/status"
+        }
+        yield mock
+
+
+@pytest.fixture
+def mock_submit_to_fal():
+    with patch("main.submit_to_fal", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "request_id": "req_test123",
+            "status": "IN_PROGRESS",
+            "status_url": "https://queue.fal.run/fal-ai/veo3.1/fast/requests/req_test123/status"
+        }
         yield mock
 
 
@@ -74,7 +96,7 @@ class TestVideoGenerationWithoutPayment:
 
 class TestVideoGenerationWithPayment:
     @pytest.mark.asyncio
-    async def test_generate_with_valid_payment_returns_200(self, client, mock_fal_pricing):
+    async def test_generate_with_valid_payment_returns_200(self, client, mock_fal_pricing, mock_submit_to_fal):
         initial_response = await client.post(
             "/api/video/generate",
             json={"prompt": "A cat playing piano", "duration_seconds": 3}
@@ -101,7 +123,7 @@ class TestVideoGenerationWithPayment:
         assert session_id in retry_response.headers["Payment-Receipt"]
 
     @pytest.mark.asyncio
-    async def test_session_cleared_after_successful_payment(self, client, mock_fal_pricing):
+    async def test_session_cleared_after_successful_payment(self, client, mock_fal_pricing, mock_submit_to_fal):
         initial_response = await client.post(
             "/api/video/generate",
             json={"prompt": "Test", "duration_seconds": 2}
@@ -272,9 +294,9 @@ class TestJobStatusEndpoint:
     async def test_get_job_status_returns_response(self, client):
         job_id = str(uuid.uuid4())
         response = await client.get(f"/api/video/jobs/{job_id}")
-        assert response.status_code == 200
+        assert response.status_code == 404
         data = response.json()
-        assert "status" in data
+        assert data["error"] == "Job not found"
 
 
 class TestGalleryEndpoint:
@@ -291,7 +313,7 @@ class TestGalleryEndpoint:
 
 class TestQuoteSessionFlow:
     @pytest.mark.asyncio
-    async def test_full_quote_session_flow(self, client, mock_fal_pricing):
+    async def test_full_quote_session_flow(self, client, mock_fal_pricing, mock_submit_to_fal):
         response1 = await client.post(
             "/api/video/generate",
             json={"prompt": "Ocean waves", "duration_seconds": 8}
@@ -637,3 +659,289 @@ class TestModelSelection:
             data = response.json()
             pricing = data["pricing"]
             assert pricing["model"] == custom_default
+
+
+class TestFalAiVideoGeneration:
+    @pytest.mark.asyncio
+    async def test_submit_to_fal_api_called_after_payment(self, client, mock_fal_pricing):
+        mock_fal_response = {
+            "request_id": "req_test123",
+            "status": "IN_PROGRESS",
+            "status_url": "https://queue.fal.run/fal-ai/veo3.1/fast/requests/req_test123/status"
+        }
+
+        with patch("main.submit_to_fal", new_callable=AsyncMock) as mock_submit:
+            mock_submit.return_value = mock_fal_response
+
+            initial_response = await client.post(
+                "/api/video/generate",
+                json={"prompt": "A cat playing piano", "duration_seconds": 3}
+            )
+            assert initial_response.status_code == 402
+            session_id = initial_response.json()["session_id"]
+
+            retry_response = await client.post(
+                "/api/video/generate",
+                json={"prompt": "A cat playing piano", "duration_seconds": 3},
+                headers={
+                    "Authorization": "Payment valid_cred",
+                    "X-Session-ID": session_id
+                }
+            )
+            assert retry_response.status_code == 200
+            data = retry_response.json()
+            assert data["success"] is True
+            assert "job_id" in data
+            assert data["status"] == "processing"
+
+            mock_submit.assert_called_once_with("fal-ai/veo3.1/fast", "A cat playing piano")
+
+    @pytest.mark.asyncio
+    async def test_get_job_status_from_fal(self, client):
+        jobs_db.clear()
+        last_poll_time.clear()
+
+        job_id = "job_test123"
+        jobs_db[job_id] = {
+            "job_id": job_id,
+            "request_id": "req_test123",
+            "endpoint_id": "fal-ai/veo3.1/fast",
+            "prompt": "Test prompt",
+            "status": "processing",
+            "video_url": None,
+            "created_at": "2026-03-24T12:00:00Z",
+        }
+
+        import fal_client
+        mock_completed = fal_client.Completed(logs=[], metrics={})
+        mock_status_response = {"status": mock_completed}
+        mock_result_response = {
+            "video": {
+                "url": "https://example.com/video.mp4",
+                "width": 832,
+                "height": 480
+            }
+        }
+
+        with patch("main.fetch_fal_job_status", new_callable=AsyncMock) as mock_status, \
+             patch("main.fetch_fal_job_result", new_callable=AsyncMock) as mock_result:
+            mock_status.return_value = mock_status_response
+            mock_result.return_value = mock_result_response
+
+            response = await client.get(f"/api/video/jobs/{job_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["job_id"] == job_id
+            assert data["status"] == "completed"
+            assert data["video_url"] == "https://example.com/video.mp4"
+            assert data["width"] == 832
+            assert data["height"] == 480
+
+            mock_status.assert_called_once_with("fal-ai/veo3.1/fast", "req_test123")
+            mock_result.assert_called_once_with("fal-ai/veo3.1/fast", "req_test123")
+
+    @pytest.mark.asyncio
+    async def test_get_job_status_cached(self, client):
+        jobs_db.clear()
+        last_poll_time.clear()
+
+        job_id = "job_cached123"
+        jobs_db[job_id] = {
+            "job_id": job_id,
+            "request_id": "req_cached123",
+            "endpoint_id": "fal-ai/veo3.1/fast",
+            "prompt": "Test prompt",
+            "status": "processing",
+            "video_url": None,
+            "created_at": "2026-03-24T12:00:00Z",
+        }
+        import time
+        last_poll_time[job_id] = time.time()
+
+        with patch("main.fetch_fal_job_status", new_callable=AsyncMock) as mock_status, \
+             patch("main.fetch_fal_job_result", new_callable=AsyncMock) as mock_result:
+            response = await client.get(f"/api/video/jobs/{job_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "processing"
+            assert data["video_url"] is None
+
+            mock_status.assert_not_called()
+            mock_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_job_completed_returns_video_url(self, client):
+        jobs_db.clear()
+        last_poll_time.clear()
+
+        job_id = "job_video123"
+        jobs_db[job_id] = {
+            "job_id": job_id,
+            "request_id": "req_video123",
+            "endpoint_id": "fal-ai/veo3.1/fast",
+            "prompt": "Test prompt",
+            "status": "completed",
+            "video_url": "https://example.com/video.mp4",
+            "width": 832,
+            "height": 480,
+            "created_at": "2026-03-24T12:00:00Z",
+        }
+
+        response = await client.get(f"/api/video/jobs/{job_id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_id"] == job_id
+        assert data["status"] == "completed"
+        assert data["video_url"] == "https://example.com/video.mp4"
+        assert data["width"] == 832
+        assert data["height"] == 480
+
+    @pytest.mark.asyncio
+    async def test_get_job_not_found_returns_404(self, client):
+        response = await client.get("/api/video/jobs/nonexistent_job")
+        assert response.status_code == 404
+        data = response.json()
+        assert data["error"] == "Job not found"
+
+
+class TestFalAiVideoGeneration:
+    @pytest.mark.asyncio
+    async def test_submit_to_fal_api_called_after_payment(self, client, mock_fal_pricing):
+        mock_fal_response = {
+            "request_id": "req_test123",
+            "status": "IN_PROGRESS",
+            "status_url": "https://queue.fal.run/fal-ai/veo3.1/fast/requests/req_test123/status"
+        }
+
+        with patch("main.submit_to_fal", new_callable=AsyncMock) as mock_submit:
+            mock_submit.return_value = mock_fal_response
+
+            initial_response = await client.post(
+                "/api/video/generate",
+                json={"prompt": "A cat playing piano", "duration_seconds": 3}
+            )
+            assert initial_response.status_code == 402
+            session_id = initial_response.json()["session_id"]
+
+            retry_response = await client.post(
+                "/api/video/generate",
+                json={"prompt": "A cat playing piano", "duration_seconds": 3},
+                headers={
+                    "Authorization": "Payment valid_cred",
+                    "X-Session-ID": session_id
+                }
+            )
+            assert retry_response.status_code == 200
+            data = retry_response.json()
+            assert data["success"] is True
+            assert "job_id" in data
+            assert data["status"] == "processing"
+
+            mock_submit.assert_called_once_with("fal-ai/veo3.1/fast", "A cat playing piano")
+
+    @pytest.mark.asyncio
+    async def test_get_job_status_from_fal(self, client):
+        jobs_db.clear()
+        last_poll_time.clear()
+
+        job_id = "job_test123"
+        jobs_db[job_id] = {
+            "job_id": job_id,
+            "request_id": "req_test123",
+            "endpoint_id": "fal-ai/veo3.1/fast",
+            "prompt": "Test prompt",
+            "status": "processing",
+            "video_url": None,
+            "created_at": "2026-03-24T12:00:00Z",
+        }
+
+        import fal_client
+        mock_completed = fal_client.Completed(logs=[], metrics={})
+        mock_status_response = {"status": mock_completed}
+        mock_result_response = {
+            "video": {
+                "url": "https://example.com/video.mp4",
+                "width": 832,
+                "height": 480
+            }
+        }
+
+        with patch("main.fetch_fal_job_status", new_callable=AsyncMock) as mock_status, \
+             patch("main.fetch_fal_job_result", new_callable=AsyncMock) as mock_result:
+            mock_status.return_value = mock_status_response
+            mock_result.return_value = mock_result_response
+
+            response = await client.get(f"/api/video/jobs/{job_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["job_id"] == job_id
+            assert data["status"] == "completed"
+            assert data["video_url"] == "https://example.com/video.mp4"
+            assert data["width"] == 832
+            assert data["height"] == 480
+
+            mock_status.assert_called_once_with("fal-ai/veo3.1/fast", "req_test123")
+            mock_result.assert_called_once_with("fal-ai/veo3.1/fast", "req_test123")
+
+    @pytest.mark.asyncio
+    async def test_get_job_status_cached(self, client):
+        jobs_db.clear()
+        last_poll_time.clear()
+
+        job_id = "job_cached123"
+        jobs_db[job_id] = {
+            "job_id": job_id,
+            "request_id": "req_cached123",
+            "endpoint_id": "fal-ai/veo3.1/fast",
+            "prompt": "Test prompt",
+            "status": "processing",
+            "video_url": None,
+            "created_at": "2026-03-24T12:00:00Z",
+        }
+        import time
+        last_poll_time[job_id] = time.time()
+
+        with patch("main.fetch_fal_job_status", new_callable=AsyncMock) as mock_status, \
+             patch("main.fetch_fal_job_result", new_callable=AsyncMock) as mock_result:
+            response = await client.get(f"/api/video/jobs/{job_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "processing"
+            assert data["video_url"] is None
+
+            mock_status.assert_not_called()
+            mock_result.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_job_completed_returns_video_url(self, client):
+        jobs_db.clear()
+        last_poll_time.clear()
+
+        job_id = "job_video123"
+        jobs_db[job_id] = {
+            "job_id": job_id,
+            "request_id": "req_video123",
+            "endpoint_id": "fal-ai/veo3.1/fast",
+            "prompt": "Test prompt",
+            "status": "completed",
+            "video_url": "https://example.com/video.mp4",
+            "width": 832,
+            "height": 480,
+            "created_at": "2026-03-24T12:00:00Z",
+        }
+
+        response = await client.get(f"/api/video/jobs/{job_id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job_id"] == job_id
+        assert data["status"] == "completed"
+        assert data["video_url"] == "https://example.com/video.mp4"
+        assert data["width"] == 832
+        assert data["height"] == 480
+
+    @pytest.mark.asyncio
+    async def test_get_job_not_found_returns_404(self, client):
+        response = await client.get("/api/video/jobs/nonexistent_job")
+        assert response.status_code == 404
+        data = response.json()
+        assert data["error"] == "Job not found"

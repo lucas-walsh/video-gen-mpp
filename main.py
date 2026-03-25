@@ -1,19 +1,27 @@
 import uuid
 import time
 import logging
+import os
 from datetime import datetime, timezone
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
-import httpx
+import fal_client
 
 from config import FAL_AI_KEY, MARKUP_PERCENT, QUOTE_TTL_SECONDS, DEFAULT_VIDEO_MODEL, SUPPORTED_VIDEO_MODELS
+from asyncio import Lock
+
+os.environ["FAL_KEY"] = FAL_AI_KEY
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 quote_sessions = {}
+jobs_db = {}
+last_poll_time = {}
+POLL_CACHE_SECONDS = 5
+jobs_lock = Lock()
 
 
 def cleanup_expired_sessions():
@@ -54,6 +62,7 @@ async def get_fal_pricing(endpoint_id: str = "fal-ai/veo3.1/fast"):
     logger.info(f"  Params: {params}")
     
     try:
+        import httpx
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params, headers=headers, timeout=10.0)
             
@@ -72,10 +81,9 @@ async def get_fal_pricing(endpoint_id: str = "fal-ai/veo3.1/fast"):
                 logger.error(f"No pricing information returned for endpoint: {endpoint_id}")
                 return None, None
             
-            # Find the price for our specific endpoint_id
             price_info = next(
                 (p for p in prices if p.get("endpoint_id") == endpoint_id),
-                prices[0]  # Fallback to first if not found
+                prices[0]
             )
             price = price_info.get("unit_price")
             unit = price_info.get("unit", "second")
@@ -83,14 +91,51 @@ async def get_fal_pricing(endpoint_id: str = "fal-ai/veo3.1/fast"):
             logger.info(f"Extracted pricing: price={price}, unit={unit}")
             return price, unit
             
-    except httpx.TimeoutException as e:
-        logger.error(f"Timeout fetching pricing from Fal.ai: {e}")
-        return None, None
-    except httpx.RequestError as e:
-        logger.error(f"Request error fetching pricing from Fal.ai: {e}")
-        return None, None
     except Exception as e:
-        logger.error(f"Unexpected error fetching pricing from Fal.ai: {e}")
+        logger.error(f"Error fetching pricing from Fal.ai: {e}")
+        return None, None
+    
+    url = "https://api.fal.ai/v1/models/pricing"
+    headers = {"Authorization": f"Key {FAL_AI_KEY}"}
+    params = {"endpoint_id": endpoint_id}
+    
+    logger.info(f"Fetching pricing from Fal.ai:")
+    logger.info(f"  URL: {url}")
+    logger.info(f"  Headers: Authorization: Key {FAL_AI_KEY[:8]}...")
+    logger.info(f"  Params: {params}")
+    
+    try:
+        import httpx
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, headers=headers, timeout=10.0)
+            
+            logger.info(f"Response status: {response.status_code}")
+            logger.info(f"Response body: {response.text}")
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to fetch pricing: HTTP {response.status_code}")
+                return None, None
+            
+            data = response.json()
+            logger.info(f"Parsed response data: {data}")
+            
+            prices = data.get("prices", [])
+            if not prices:
+                logger.error(f"No pricing information returned for endpoint: {endpoint_id}")
+                return None, None
+            
+            price_info = next(
+                (p for p in prices if p.get("endpoint_id") == endpoint_id),
+                prices[0]
+            )
+            price = price_info.get("unit_price")
+            unit = price_info.get("unit", "second")
+            
+            logger.info(f"Extracted pricing: price={price}, unit={unit}")
+            return price, unit
+            
+    except Exception as e:
+        logger.error(f"Error fetching pricing from Fal.ai: {e}")
         return None, None
 
 
@@ -110,6 +155,45 @@ def verify_payment_credential(credential: str, session_id: str) -> bool:
     return True
 
 
+async def submit_to_fal(model: str, prompt: str):
+    try:
+        handle = await fal_client.submit_async(
+            model,
+            arguments={"prompt": prompt}
+        )
+        return {"request_id": handle.request_id, "handle": handle}
+    except fal_client.FalClientHTTPError as e:
+        logger.error(f"FAL HTTP error: {e.status_code} - {e.message}")
+        raise
+    except fal_client.FalClientError as e:
+        logger.error(f"FAL client error: {e}")
+        raise
+
+
+async def fetch_fal_job_status(endpoint_id: str, request_id: str):
+    try:
+        status = await fal_client.status_async(endpoint_id, request_id=request_id)
+        return {"status": status}
+    except fal_client.FalClientHTTPError as e:
+        logger.error(f"FAL HTTP error: {e.status_code} - {e.message}")
+        raise
+    except fal_client.FalClientError as e:
+        logger.error(f"FAL client error: {e}")
+        raise
+
+
+async def fetch_fal_job_result(endpoint_id: str, request_id: str):
+    try:
+        result = await fal_client.result_async(endpoint_id, request_id=request_id)
+        return result
+    except fal_client.FalClientHTTPError as e:
+        logger.error(f"FAL HTTP error: {e.status_code} - {e.message}")
+        raise
+    except fal_client.FalClientError as e:
+        logger.error(f"FAL client error: {e}")
+        raise
+
+
 async def generate_video(request):
     cleanup_expired_sessions()
 
@@ -124,10 +208,47 @@ async def generate_video(request):
             session_id = request.headers.get("X-Session-ID")
 
     if payment_credential and session_id:
+        logger.info(f"Payment attempt: session_id={session_id}, credential={payment_credential}")
+        logger.info(f"Sessions in memory: {list(quote_sessions.keys())}")
+        logger.info(f"Session exists: {session_id in quote_sessions}")
         if verify_payment_credential(payment_credential, session_id):
             session = quote_sessions[session_id]
             job_id = f"job_{uuid.uuid4().hex}"
+            model = session["model"]
+            prompt = session["prompt"]
             del quote_sessions[session_id]
+
+            try:
+                fal_response = await submit_to_fal(model, prompt)
+            except fal_client.FalClientHTTPError as e:
+                logger.error(f"Failed to submit to Fal.ai: HTTP {e.status_code} - {e.message}")
+                return JSONResponse({
+                    "success": False,
+                    "error": f"Failed to submit video generation request: {e.message}",
+                    "status_code": e.status_code,
+                }, status_code=503)
+            except fal_client.FalClientError as e:
+                logger.error(f"Failed to submit to Fal.ai: {e}")
+                return JSONResponse({
+                    "success": False,
+                    "error": f"Failed to submit video generation request: {str(e)}",
+                }, status_code=503)
+            except fal_client.FalClientError as e:
+                logger.error(f"Failed to submit to Fal.ai: {e}")
+                return JSONResponse({
+                    "success": False,
+                    "error": f"Failed to submit video generation request: {str(e)}",
+                }, status_code=503)
+
+            jobs_db[job_id] = {
+                "job_id": job_id,
+                "request_id": fal_response["request_id"],
+                "endpoint_id": model,
+                "prompt": prompt,
+                "status": "processing",
+                "video_url": None,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
 
             return JSONResponse({
                 "success": True,
@@ -206,7 +327,57 @@ async def generate_video(request):
 
 
 async def get_job(request):
-    return JSONResponse({"status": "placeholder"})
+    job_id = request.path_params["job_id"]
+    job = jobs_db.get(job_id)
+    if not job:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+
+    now = time.time()
+    last_poll = last_poll_time.get(job_id, 0)
+
+    if now - last_poll > POLL_CACHE_SECONDS and job["status"] != "completed":
+        async with jobs_lock:
+            if now - last_poll_time.get(job_id, 0) > POLL_CACHE_SECONDS:
+                try:
+                    status_data = await fetch_fal_job_status(job["endpoint_id"], job["request_id"])
+                    status_obj = status_data["status"]
+                    
+                    if isinstance(status_obj, fal_client.Completed):
+                        job["status"] = "completed"
+                        result_data = await fetch_fal_job_result(job["endpoint_id"], job["request_id"])
+                        job["video_url"] = result_data.get("video", {}).get("url")
+                        job["width"] = result_data.get("video", {}).get("width")
+                        job["height"] = result_data.get("video", {}).get("height")
+                    elif isinstance(status_obj, fal_client.InProgress):
+                        job["status"] = "processing"
+                    elif isinstance(status_obj, fal_client.Queued):
+                        job["status"] = "queued"
+                    else:
+                        job["status"] = str(status_obj).lower()
+                    
+                    last_poll_time[job_id] = now
+                except fal_client.FalClientHTTPError as e:
+                    logger.error(f"HTTP error from Fal.ai: {e.status_code} - {e.message}")
+                    job["status"] = "failed"
+                    job["error"] = f"Fal.ai API error: {e.status_code}"
+                except fal_client.FalClientError as e:
+                    logger.error(f"Failed to fetch job status from Fal.ai: {e}")
+                    job["status"] = "failed"
+                    job["error"] = f"FAL client error: {str(e)}"
+
+    response_data = {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "video_url": job.get("video_url"),
+        "width": job.get("width"),
+        "height": job.get("height"),
+        "created_at": job["created_at"],
+    }
+    
+    if job.get("error"):
+        response_data["error"] = job["error"]
+    
+    return JSONResponse(response_data)
 
 
 async def get_gallery(request):
