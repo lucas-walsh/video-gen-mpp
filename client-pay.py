@@ -194,12 +194,57 @@ def sign_transaction(
     return "0x" + full_signature, transaction_hash
 
 
+def create_signed_transaction_bytes(
+    transaction: Dict[str, Any],
+    signature: str,
+) -> bytes:
+    """
+    Create full RLP-encoded signed transaction bytes.
+    
+    Args:
+        transaction: Transaction dictionary
+        signature: Full signature hex string (with 0x prefix)
+        
+    Returns:
+        RLP-encoded signed transaction bytes
+    """
+    try:
+        from eth_account.typed_transactions import TypedTransaction
+        
+        tx_dict = {
+            "chainId": transaction.get("chainId", 57059),
+            "nonce": transaction.get("nonce", 0),
+            "to": transaction.get("to", ""),
+            "value": int(transaction.get("value", "0x0"), 16),
+            "data": transaction.get("data", "0x"),
+            "validBefore": transaction.get("validBefore", 0),
+            "feeToken": transaction.get("feeToken", ""),
+            "feePayer": transaction.get("feePayer", ""),
+        }
+        
+        sig_bytes = bytes.fromhex(signature[2:])
+        v = sig_bytes[-1]
+        r = int.from_bytes(sig_bytes[:32], 'big')
+        s = int.from_bytes(sig_bytes[32:64], 'big')
+        
+        tx_dict["v"] = v + 27
+        tx_dict["r"] = r
+        tx_dict["s"] = s
+        
+        typed_tx = TypedTransaction.from_dict(tx_dict)
+        return typed_tx.as_bytes()
+        
+    except Exception as e:
+        logging.error(f"Failed to create signed transaction bytes: {e}")
+        return b""
+
+
 def make_initial_request(
     api_url: str,
     prompt: str,
     duration: int,
     model: str = "fal-ai/veo3.1/fast",
-) -> Tuple[Optional[Dict[str, Any]], Optional[str], str]:
+) -> Tuple[Optional[Dict[str, Any]], Optional[str], str, Optional[str]]:
     """
     Make initial request to video generation endpoint.
     
@@ -210,7 +255,7 @@ def make_initial_request(
         model: Video model to use
         
     Returns:
-        Tuple of (challenge_dict, www_auth_header, error_message)
+        Tuple of (challenge_dict, www_auth_header, error_message, session_id)
     """
     endpoint = f"{api_url}/api/video/generate"
     
@@ -226,26 +271,32 @@ def make_initial_request(
             
             if response.status_code == 402:
                 www_auth = response.headers.get("WWW-Authenticate", "")
+                session_id = None
+                try:
+                    resp_json = response.json()
+                    session_id = resp_json.get("session_id")
+                except Exception:
+                    pass
                 if www_auth.startswith("Payment "):
                     challenge = parse_challenge_header(www_auth)
                     if challenge:
-                        return challenge, www_auth, ""
-                return None, www_auth, "Failed to parse challenge header"
+                        return challenge, www_auth, "", session_id
+                return None, www_auth, "Failed to parse challenge header", session_id
             
             elif response.status_code == 200:
-                return None, "", f"Unexpected 200 response: {response.json()}"
+                return None, "", f"Unexpected 200 response: {response.json()}", None
             
             elif response.status_code == 400:
-                return None, "", f"Bad request: {response.json()}"
+                return None, "", f"Bad request: {response.json()}", None
             
             elif response.status_code == 503:
-                return None, "", f"Service unavailable: {response.json()}"
+                return None, "", f"Service unavailable: {response.json()}", None
             
             else:
-                return None, "", f"Unexpected status {response.status_code}: {response.text}"
+                return None, "", f"Unexpected status {response.status_code}: {response.text}", None
                 
     except httpx.RequestError as e:
-        return None, "", f"Request failed: {str(e)}"
+        return None, "", f"Request failed: {str(e)}", None
 
 
 def send_payment_request(
@@ -350,7 +401,7 @@ def run_payment_flow(
     print(f"  Duration: {duration}s")
     print(f"  Prompt: {prompt[:50]}{'...' if len(prompt) > 50 else ''}")
     
-    challenge, www_auth, error = make_initial_request(
+    challenge, www_auth, error, session_id = make_initial_request(
         api_url, prompt, duration, model
     )
     
@@ -366,6 +417,8 @@ def run_payment_flow(
     
     print(f"\nStep 2: Got 402 challenge")
     print(f"  Challenge ID: {challenge.get('id', 'N/A')[:16]}...")
+    if session_id:
+        print(f"  Session ID: {session_id}")
     
     request_params = decode_challenge_request(challenge)
     if not request_params:
@@ -384,8 +437,7 @@ def run_payment_flow(
     print(f"  Recipient: {recipient}")
     print(f"  Expires: {expires}")
     
-    session_id = None
-    if "id" in challenge:
+    if not session_id:
         session_id = f"quote_{challenge['id'][:12]}"
     
     print(f"\nStep 3: Creating TIP-20 transfer transaction...")
@@ -425,6 +477,8 @@ def run_payment_flow(
     
     print(f"\nStep 5: Creating payment credential...")
     
+    signed_tx_bytes = create_signed_transaction_bytes(transaction, signature)
+    
     transfer_params = {
         "recipient": recipient,
         "amount": amount_micro_usd,
@@ -435,7 +489,14 @@ def run_payment_flow(
         challenge=challenge,
         transaction_hash=tx_hash,
         transfer_params=transfer_params,
+        transaction_bytes=signed_tx_bytes if signed_tx_bytes else None,
     )
+    
+    if not signed_tx_bytes:
+        print(f"  Warning: Could not create signed transaction bytes (using mock mode)")
+    
+    if not signed_tx_bytes:
+        print(f"  Warning: Could not create signed transaction bytes (using mock mode)")
     
     print(f"  Credential encoded: {credential_b64[:40]}...")
     

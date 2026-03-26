@@ -241,6 +241,7 @@ def create_credential(
     transaction_hash: str,
     transfer_params: Dict[str, Any],
     valid_before: Optional[datetime] = None,
+    transaction_bytes: Optional[bytes] = None,
 ) -> str:
     """
     Create a payment credential for client use.
@@ -250,6 +251,7 @@ def create_credential(
         transaction_hash: Transaction hash
         transfer_params: Transfer parameters (recipient, amount, currency)
         valid_before: Optional validity deadline
+        transaction_bytes: Optional raw signed transaction bytes
         
     Returns:
         Base64url-encoded credential string
@@ -265,6 +267,9 @@ def create_credential(
     
     if valid_before:
         credential['payload']['validBefore'] = valid_before.isoformat()
+    
+    if transaction_bytes:
+        credential['payload']['transaction_bytes'] = transaction_bytes.hex()
     
     credential_json = json.dumps(credential, sort_keys=True, separators=(',', ':'))
     return base64url_encode(credential_json.encode('utf-8'))
@@ -578,7 +583,7 @@ def verify_credential_full(
     
     if tx_bytes:
         expected_recipient = request_params.get('recipient', '')
-        expected_amount = int(float(request_params.get('amount', '0')) * 10 ** 18)
+        expected_amount = int(float(request_params.get('amount', '0')) * 10 ** 6)
         
         calldata_valid, decoded_calldata, calldata_error = verify_transfer_calldata(
             tx_bytes=tx_bytes,

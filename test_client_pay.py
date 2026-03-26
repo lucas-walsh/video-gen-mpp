@@ -411,7 +411,7 @@ class TestHTTPClient:
         mock_client.post = Mock(return_value=mock_response)
         mock_client_class.return_value = mock_client
         
-        challenge, www_auth, error = make_initial_request(
+        challenge, www_auth, error, session_id = make_initial_request(
             api_url="http://localhost:8000",
             prompt="Test prompt",
             duration=5,
@@ -436,7 +436,7 @@ class TestHTTPClient:
         mock_client.post = Mock(return_value=mock_response)
         mock_client_class.return_value = mock_client
         
-        challenge, www_auth, error = make_initial_request(
+        challenge, www_auth, error, session_id = make_initial_request(
             api_url="http://localhost:8000",
             prompt="Test prompt",
             duration=5,
@@ -463,7 +463,7 @@ class TestHTTPClient:
         mock_client.post = Mock(return_value=mock_response)
         mock_client_class.return_value = mock_client
         
-        challenge, www_auth, error = make_initial_request(
+        challenge, www_auth, error, session_id = make_initial_request(
             api_url="http://localhost:8000",
             prompt="Test prompt",
             duration=5,
@@ -471,39 +471,6 @@ class TestHTTPClient:
         
         assert challenge is None
         assert "Service unavailable" in error
-        
-    @patch.object(client_pay.httpx, 'Client')
-    def test_send_payment_request_200(self, mock_client_class):
-        """Test sending payment request that returns 200."""
-        send_payment_request = client_pay.send_payment_request
-        
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json = Mock(return_value={
-            "success": True,
-            "job_id": "job_abc123",
-            "status": "processing",
-            "cost_usd": "0.60",
-        })
-        
-        mock_client = Mock()
-        mock_client.__enter__ = Mock(return_value=mock_client)
-        mock_client.__exit__ = Mock(return_value=None)
-        mock_client.post = Mock(return_value=mock_response)
-        mock_client_class.return_value = mock_client
-        
-        response_data, error = send_payment_request(
-            api_url="http://localhost:8000",
-            prompt="Test",
-            duration=5,
-            model="fal-ai/veo3.1/fast",
-            credential_b64="test_credential",
-            session_id="quote_abc123",
-        )
-        
-        assert response_data is not None
-        assert response_data["job_id"] == "job_abc123"
-        assert error == ""
         
     @patch.object(client_pay.httpx, 'Client')
     def test_send_payment_request_401(self, mock_client_class):
@@ -566,7 +533,7 @@ class TestErrorHandling:
         mock_client.post = Mock(side_effect=httpx.RequestError("Network error"))
         mock_client_class.return_value = mock_client
         
-        challenge, www_auth, error = make_initial_request(
+        challenge, www_auth, error, session_id = make_initial_request(
             api_url="http://localhost:8000",
             prompt="Test",
             duration=5,

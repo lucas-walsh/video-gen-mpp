@@ -40,6 +40,9 @@ from mpp.credential import (
 from mpp.broadcast import create_receipt
 
 
+import pytest
+
+
 class TestResult:
     """Track test results."""
     def __init__(self):
@@ -66,6 +69,12 @@ class TestResult:
                 print(f"  - {name}: {error}")
         print(f"{'='*60}")
         return self.failed == 0
+
+
+@pytest.fixture
+def result():
+    """Provide TestResult fixture for tests."""
+    return TestResult()
 
 
 async def test_challenge_generation(result: TestResult):
