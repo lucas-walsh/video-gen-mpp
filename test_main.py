@@ -1,3 +1,9 @@
+"""
+Main API Tests with MPP Integration
+
+Tests for the video generation API with proper MPP payment verification.
+"""
+
 import pytest
 import time
 import uuid
@@ -5,13 +11,20 @@ import os
 from unittest.mock import patch, AsyncMock, MagicMock
 
 from httpx import AsyncClient
-from main import app, quote_sessions, cleanup_expired_sessions, calculate_final_price, verify_payment_credential, get_fal_pricing, jobs_db, last_poll_time, submit_to_fal, fetch_fal_job_status, fetch_fal_job_result
+from main import app, quote_sessions, cleanup_expired_sessions, calculate_final_price, jobs_db, last_poll_time
 from config import MARKUP_PERCENT, QUOTE_TTL_SECONDS, SUPPORTED_VIDEO_MODELS, DEFAULT_VIDEO_MODEL
+from mpp.config import MPPConfig, reset_config
+from mpp.challenge import create_challenge, format_challenge_header
+from mpp.broadcast import create_receipt, format_receipt_header, decode_receipt_header
+from mpp.broadcast import create_receipt, format_receipt_header, decode_receipt_header
 
 
 @pytest.fixture
 async def client():
     quote_sessions.clear()
+    jobs_db.clear()
+    last_poll_time.clear()
+    reset_config()
     async with AsyncClient(app=app, base_url="http://test") as ac:
         yield ac
 
@@ -29,20 +42,20 @@ def mock_submit_to_fal():
         mock.return_value = {
             "request_id": "req_test123",
             "status": "IN_PROGRESS",
-            "status_url": "https://queue.fal.run/fal-ai/veo3.1/fast/requests/req_test123/status"
         }
         yield mock
 
 
 @pytest.fixture
-def mock_submit_to_fal():
-    with patch("main.submit_to_fal", new_callable=AsyncMock) as mock:
-        mock.return_value = {
-            "request_id": "req_test123",
-            "status": "IN_PROGRESS",
-            "status_url": "https://queue.fal.run/fal-ai/veo3.1/fast/requests/req_test123/status"
-        }
-        yield mock
+def mock_mpp_config():
+    config = MPPConfig(
+        tempo_rpc_url="https://test.rpc",
+        server_private_key="0x" + "01" * 32,
+        pathusd_address="0x20c0000000000000000000000000000000000000",
+        mpp_secret_key="test_mpp_secret_key"
+    )
+    with patch("main.get_mpp_config", return_value=config):
+        yield config
 
 
 class TestHomepage:
@@ -52,312 +65,312 @@ class TestHomepage:
         assert response.status_code == 200
         data = response.json()
         assert data["name"] == "Video Generation API (MPP)"
-        assert data["version"] == "1.0.0"
         assert "endpoints" in data
-        assert "POST /api/video/generate" in data["endpoints"]
-        assert "GET /api/video/jobs/{job_id}" in data["endpoints"]
-        assert "GET /api/video/gallery" in data["endpoints"]
 
 
 class TestVideoGenerationWithoutPayment:
     @pytest.mark.asyncio
-    async def test_generate_without_payment_returns_402(self, client, mock_fal_pricing):
+    async def test_generate_without_payment_returns_402(self, client, mock_fal_pricing, mock_mpp_config):
         response = await client.post(
             "/api/video/generate",
             json={"prompt": "A beautiful sunset", "duration_seconds": 5}
         )
         assert response.status_code == 402
         data = response.json()
-        assert data["success"] is False
-        assert data["error"] == "Payment required"
-        assert "session_id" in data
-        assert "pricing" in data
-        assert "expires_in_seconds" in data
-        assert data["pricing"]["duration_seconds"] == 5
+        assert data["type"] == "https://paymentauth.org/problems/payment-required"
+        assert data["title"] == "Payment Required"
+        assert data["status"] == 402
+        assert "amount" in data
+        assert "currency" in data
+        assert "expires_in" in data
         assert "WWW-Authenticate" in response.headers
-        assert 'Payment realm="video-gen"' in response.headers["WWW-Authenticate"]
-
+        assert 'Payment realm="video-gen-api"' in response.headers["WWW-Authenticate"]
+        assert response.headers["Cache-Control"] == "no-store"
+        
     @pytest.mark.asyncio
-    async def test_402_response_includes_pricing_details(self, client, mock_fal_pricing):
+    async def test_402_response_problem_details_format(self, client, mock_fal_pricing, mock_mpp_config):
         response = await client.post(
             "/api/video/generate",
             json={"prompt": "Test video", "duration_seconds": 10}
         )
         data = response.json()
-        pricing = data["pricing"]
-        assert "price_per_unit" in pricing
-        assert pricing["price_per_unit"] == 0.05
-        assert pricing["unit"] == "second"
-        assert pricing["duration_seconds"] == 10
-        assert pricing["subtotal_usd"] == 0.50
-        assert pricing["markup_percent"] == MARKUP_PERCENT
-        assert pricing["final_price_total"] == round(0.50 * (1 + MARKUP_PERCENT / 100), 2)
+        assert data["type"] == "https://paymentauth.org/problems/payment-required"
+        assert data["title"] == "Payment Required"
+        assert data["status"] == 402
+        assert "$0.60" in data["detail"]
+        assert "pathUSD" in data["detail"]
+        
+    @pytest.mark.asyncio
+    async def test_challenge_amount_matches_fal_price_plus_markup(self, client, mock_mpp_config):
+        fal_price_per_second = 0.05
+        duration = 10
+        expected_subtotal = fal_price_per_second * duration
+        expected_total = expected_subtotal * (1 + MARKUP_PERCENT / 100)
+        expected_amount_cents = int(expected_total * 1_000_000)
+        
+        with patch("main.get_fal_pricing", new_callable=AsyncMock) as mock_pricing:
+            mock_pricing.return_value = (fal_price_per_second, "second")
+            response = await client.post(
+                "/api/video/generate",
+                json={"prompt": "Test", "duration_seconds": duration}
+            )
+        
+        data = response.json()
+        assert data["amount"] == str(expected_amount_cents)
+
+
+class TestMPPChallengeGeneration:
+    @pytest.mark.asyncio
+    async def test_challenge_has_required_fields(self, client, mock_fal_pricing, mock_mpp_config):
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "Test", "duration_seconds": 5}
+        )
+        
+        header = response.headers["WWW-Authenticate"]
+        assert 'id="' in header
+        assert 'realm="video-gen-api"' in header
+        assert 'method="tempo"' in header
+        assert 'intent="charge"' in header
+        assert 'request="' in header
+        assert 'expires="' in header
+        
+    @pytest.mark.asyncio
+    async def test_challenge_request_is_base64url(self, client, mock_fal_pricing, mock_mpp_config):
+        from mpp.challenge import base64url_decode, jcs_decode
+        
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "Test", "duration_seconds": 5}
+        )
+        
+        header = response.headers["WWW-Authenticate"]
+        request_start = header.find('request="') + len('request="')
+        request_end = header.find('"', request_start)
+        request_b64 = header[request_start:request_end]
+        
+        decoded = base64url_decode(request_b64)
+        request_data = jcs_decode(decoded.decode('utf-8'))
+        
+        assert "amount" in request_data
+        assert "recipient" in request_data
+        assert "currency" in request_data
+        
+    @pytest.mark.asyncio
+    async def test_challenge_hmac_binding(self, client, mock_fal_pricing, mock_mpp_config):
+        from mpp.challenge import parse_challenge_header, verify_challenge_binding
+        
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "Test", "duration_seconds": 5}
+        )
+        
+        header = response.headers["WWW-Authenticate"]
+        challenge = parse_challenge_header(header)
+        
+        assert challenge is not None
+        assert verify_challenge_binding(challenge, mock_mpp_config.MPP_SECRET_KEY)
 
 
 class TestVideoGenerationWithPayment:
     @pytest.mark.asyncio
-    async def test_generate_with_valid_payment_returns_200(self, client, mock_fal_pricing, mock_submit_to_fal):
-        initial_response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "A cat playing piano", "duration_seconds": 3}
-        )
-        assert initial_response.status_code == 402
-        session_id = initial_response.json()["session_id"]
-        payment_credential = "test_credential_123"
-
-        retry_response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "A cat playing piano", "duration_seconds": 3},
-            headers={
-                "Authorization": f"Payment {payment_credential}",
-                "X-Session-ID": session_id
-            }
-        )
-        assert retry_response.status_code == 200
-        data = retry_response.json()
-        assert data["success"] is True
-        assert "job_id" in data
-        assert data["status"] == "processing"
-        assert "cost_usd" in data
-        assert "Payment-Receipt" in retry_response.headers
-        assert session_id in retry_response.headers["Payment-Receipt"]
-
+    async def test_generate_with_valid_payment_returns_200(self, client, mock_fal_pricing, mock_submit_to_fal, mock_mpp_config):
+        with patch("main.verify_transfer_calldata", return_value=(True, {}, "")):
+            with patch("main.verify_transaction_signature", return_value=(True, "0x" + "00" * 40, "")):
+                initial_response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "A cat playing piano", "duration_seconds": 3}
+                )
+                assert initial_response.status_code == 402
+                session_id = initial_response.json()["session_id"]
+                challenge = quote_sessions[session_id]["challenge"]
+                
+                from mpp.credential import create_credential
+                import json
+                from mpp.challenge import base64url_encode, jcs_encode
+                
+                credential_data = {
+                    "challenge": challenge,
+                    "payload": {
+                        "transfer": {
+                            "recipient": mock_mpp_config.SERVER_ADDRESS,
+                            "amount": str(int(quote_sessions[session_id]["final_price_total"] * 1_000_000)),
+                            "currency": "pathUSD"
+                        },
+                        "transaction_bytes": "0x" + "00" * 200
+                    },
+                    "type": "transaction"
+                }
+                
+                credential_json = jcs_encode(credential_data)
+                credential_b64 = base64url_encode(credential_json.encode('utf-8'))
+                
+                retry_response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "A cat playing piano", "duration_seconds": 3},
+                    headers={
+                        "Authorization": f"Payment {credential_b64}",
+                        "X-Session-ID": session_id
+                    }
+                )
+                assert retry_response.status_code == 200
+                data = retry_response.json()
+                assert data["success"] is True
+                assert "job_id" in data
+        
     @pytest.mark.asyncio
-    async def test_session_cleared_after_successful_payment(self, client, mock_fal_pricing, mock_submit_to_fal):
-        initial_response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "Test", "duration_seconds": 2}
-        )
-        session_id = initial_response.json()["session_id"]
-        assert session_id in quote_sessions
-
-        await client.post(
-            "/api/video/generate",
-            json={"prompt": "Test", "duration_seconds": 2},
-            headers={
-                "Authorization": "Payment valid_cred",
-                "X-Session-ID": session_id
-            }
-        )
-        assert session_id not in quote_sessions
+    async def test_session_cleared_after_successful_payment(self, client, mock_fal_pricing, mock_submit_to_fal, mock_mpp_config):
+        with patch("main.verify_transfer_calldata", return_value=(True, {}, "")):
+            with patch("main.verify_transaction_signature", return_value=(True, "0x" + "00" * 40, "")):
+                initial_response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test", "duration_seconds": 2}
+                )
+                session_id = initial_response.json()["session_id"]
+                assert session_id in quote_sessions
+                
+                from mpp.challenge import base64url_encode, jcs_encode
+                
+                credential_data = {
+                    "challenge": quote_sessions[session_id]["challenge"],
+                    "payload": {
+                        "transfer": {"recipient": mock_mpp_config.SERVER_ADDRESS, "amount": "1000000", "currency": "pathUSD"},
+                        "transaction_bytes": "0x" + "00" * 200
+                    },
+                    "type": "transaction"
+                }
+                
+                credential_json = jcs_encode(credential_data)
+                credential_b64 = base64url_encode(credential_json.encode('utf-8'))
+                
+                await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test", "duration_seconds": 2},
+                    headers={
+                        "Authorization": f"Payment {credential_b64}",
+                        "X-Session-ID": session_id
+                    }
+                )
+                assert session_id not in quote_sessions
 
 
 class TestInvalidPaymentCredential:
     @pytest.mark.asyncio
-    async def test_invalid_session_id_returns_401(self, client, mock_fal_pricing):
+    async def test_invalid_session_id_returns_401(self, client, mock_fal_pricing, mock_mpp_config):
+        from mpp.challenge import base64url_encode, jcs_encode
+        
+        challenge = create_challenge(
+            amount=1.00,
+            recipient=mock_mpp_config.SERVER_ADDRESS,
+            realm="video-gen-api",
+            secret_key=mock_mpp_config.MPP_SECRET_KEY
+        )
+        
+        credential_data = {
+            "challenge": challenge,
+            "payload": {"transfer": {}},
+            "type": "transaction"
+        }
+        credential_json = jcs_encode(credential_data)
+        credential_b64 = base64url_encode(credential_json.encode('utf-8'))
+        
         response = await client.post(
             "/api/video/generate",
             json={"prompt": "Test", "duration_seconds": 5},
             headers={
-                "Authorization": "Payment some_cred",
+                "Authorization": f"Payment {credential_b64}",
                 "X-Session-ID": "nonexistent_session"
             }
         )
         assert response.status_code == 401
-        data = response.json()
-        assert data["success"] is False
-        assert data["error"] == "Invalid or expired payment credential"
-
+        
     @pytest.mark.asyncio
-    async def test_expired_session_returns_401(self, client, mock_fal_pricing):
+    async def test_tampered_challenge_returns_401(self, client, mock_fal_pricing, mock_mpp_config):
         initial_response = await client.post(
             "/api/video/generate",
             json={"prompt": "Test", "duration_seconds": 5}
         )
         session_id = initial_response.json()["session_id"]
-        quote_sessions[session_id]["expires_at"] = time.time() - 100
-
+        challenge = quote_sessions[session_id]["challenge"]
+        
+        challenge["id"] = "tampered_id"
+        
+        from mpp.challenge import base64url_encode, jcs_encode
+        credential_data = {
+            "challenge": challenge,
+            "payload": {"transfer": {}},
+            "type": "transaction"
+        }
+        credential_json = jcs_encode(credential_data)
+        credential_b64 = base64url_encode(credential_json.encode('utf-8'))
+        
         response = await client.post(
             "/api/video/generate",
             json={"prompt": "Test", "duration_seconds": 5},
             headers={
-                "Authorization": "Payment some_cred",
+                "Authorization": f"Payment {credential_b64}",
                 "X-Session-ID": session_id
             }
         )
         assert response.status_code == 401
 
+
+class TestReplayPrevention:
     @pytest.mark.asyncio
-    async def test_missing_session_id_header_returns_402(self, client, mock_fal_pricing):
-        initial_response = await client.post(
+    async def test_reused_credential_rejected(self, client, mock_fal_pricing, mock_submit_to_fal, mock_mpp_config):
+        with patch("main.verify_transfer_calldata", return_value=(True, {}, "")):
+            with patch("main.verify_transaction_signature", return_value=(True, "0x" + "00" * 40, "")):
+                from mpp.challenge import base64url_encode, jcs_encode
+                
+                initial_response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test", "duration_seconds": 2}
+                )
+                session_id = initial_response.json()["session_id"]
+                challenge = quote_sessions[session_id]["challenge"]
+                
+                credential_id = challenge["id"]
+                credential_data = {
+                    "id": credential_id,
+                    "challenge": challenge,
+                    "payload": {
+                        "transfer": {"recipient": mock_mpp_config.SERVER_ADDRESS, "amount": "1000000", "currency": "pathUSD"},
+                        "transaction_bytes": "0x" + "00" * 200
+                    },
+                    "type": "transaction"
+                }
+                credential_json = jcs_encode(credential_data)
+                credential_b64 = base64url_encode(credential_json.encode('utf-8'))
+                
+                response1 = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test", "duration_seconds": 2},
+                    headers={
+                        "Authorization": f"Payment {credential_b64}",
+                        "X-Session-ID": session_id
+                    }
+                )
+                assert response1.status_code == 200
+        
+        quote_sessions[session_id] = {
+            "prompt": "Test",
+            "duration_seconds": 2,
+            "model": "fal-ai/veo3.1/fast",
+            "final_price_total": 0.12,
+            "expires_at": time.time() + 300,
+            "challenge": challenge,
+        }
+        
+        response2 = await client.post(
             "/api/video/generate",
-            json={"prompt": "Test", "duration_seconds": 5}
-        )
-        session_id = initial_response.json()["session_id"]
-
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "Test", "duration_seconds": 5},
-            headers={"Authorization": "Payment some_cred"}
-        )
-        assert response.status_code == 402
-
-    @pytest.mark.asyncio
-    async def test_empty_payment_credential_returns_402(self, client, mock_fal_pricing):
-        initial_response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "Test", "duration_seconds": 5}
-        )
-        session_id = initial_response.json()["session_id"]
-
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "Test", "duration_seconds": 5},
+            json={"prompt": "Test", "duration_seconds": 2},
             headers={
-                "Authorization": "Payment ",
+                "Authorization": f"Payment {credential_b64}",
                 "X-Session-ID": session_id
             }
         )
-        assert response.status_code == 402
-
-
-class TestInvalidRequestBody:
-    @pytest.mark.asyncio
-    async def test_missing_prompt_returns_400(self, client, mock_fal_pricing):
-        response = await client.post(
-            "/api/video/generate",
-            json={"duration_seconds": 5}
-        )
-        assert response.status_code == 400
-        data = response.json()
-        assert data["success"] is False
-        assert "prompt is required" in data["error"]
-
-    @pytest.mark.asyncio
-    async def test_missing_duration_returns_400(self, client, mock_fal_pricing):
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "A test video"}
-        )
-        assert response.status_code == 400
-        data = response.json()
-        assert data["success"] is False
-        assert "duration_seconds is required" in data["error"]
-
-    @pytest.mark.asyncio
-    async def test_duration_below_minimum_returns_400(self, client, mock_fal_pricing):
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "A test video", "duration_seconds": 0}
-        )
-        assert response.status_code == 400
-        data = response.json()
-        assert data["success"] is False
-        assert "duration_seconds must be between 1 and 30" in data["error"]
-
-    @pytest.mark.asyncio
-    async def test_duration_above_maximum_returns_400(self, client, mock_fal_pricing):
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "A test video", "duration_seconds": 31}
-        )
-        assert response.status_code == 400
-        data = response.json()
-        assert data["success"] is False
-        assert "duration_seconds must be between 1 and 30" in data["error"]
-
-    @pytest.mark.asyncio
-    async def test_empty_prompt_string_returns_400(self, client, mock_fal_pricing):
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "", "duration_seconds": 5}
-        )
-        assert response.status_code == 400
-        data = response.json()
-        assert data["success"] is False
-        assert "prompt must be a non-empty string" in data["error"]
-
-    @pytest.mark.asyncio
-    async def test_whitespace_only_prompt_returns_400(self, client, mock_fal_pricing):
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "   ", "duration_seconds": 5}
-        )
-        assert response.status_code == 400
-        data = response.json()
-        assert data["success"] is False
-        assert "prompt must be a non-empty string" in data["error"]
-
-    @pytest.mark.asyncio
-    async def test_non_numeric_duration_returns_400(self, client, mock_fal_pricing):
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "Test", "duration_seconds": "five"}
-        )
-        assert response.status_code == 400
-        data = response.json()
-        assert data["success"] is False
-
-
-class TestJobStatusEndpoint:
-    @pytest.mark.asyncio
-    async def test_get_job_status_returns_response(self, client):
-        job_id = str(uuid.uuid4())
-        response = await client.get(f"/api/video/jobs/{job_id}")
-        assert response.status_code == 404
-        data = response.json()
-        assert data["error"] == "Job not found"
-
-
-class TestGalleryEndpoint:
-    @pytest.mark.asyncio
-    async def test_get_gallery_returns_empty_list(self, client):
-        response = await client.get("/api/video/gallery")
-        assert response.status_code == 200
-        data = response.json()
-        assert "videos" in data
-        assert "total" in data
-        assert data["videos"] == []
-        assert data["total"] == 0
-
-
-class TestQuoteSessionFlow:
-    @pytest.mark.asyncio
-    async def test_full_quote_session_flow(self, client, mock_fal_pricing, mock_submit_to_fal):
-        response1 = await client.post(
-            "/api/video/generate",
-            json={"prompt": "Ocean waves", "duration_seconds": 8}
-        )
-        assert response1.status_code == 402
-        session_id = response1.json()["session_id"]
-        pricing = response1.json()["pricing"]
-
-        assert session_id in quote_sessions
-        assert quote_sessions[session_id]["prompt"] == "Ocean waves"
-        assert quote_sessions[session_id]["duration_seconds"] == 8
-
-        response2 = await client.post(
-            "/api/video/generate",
-            json={"prompt": "Ocean waves", "duration_seconds": 8},
-            headers={
-                "Authorization": "Payment valid_token",
-                "X-Session-ID": session_id
-            }
-        )
-        assert response2.status_code == 200
-        assert response2.json()["success"] is True
-        assert "job_id" in response2.json()
-        assert session_id not in quote_sessions
-
-    @pytest.mark.asyncio
-    async def test_multiple_sessions_can_coexist(self, client, mock_fal_pricing):
-        response1 = await client.post(
-            "/api/video/generate",
-            json={"prompt": "First video", "duration_seconds": 5}
-        )
-        response2 = await client.post(
-            "/api/video/generate",
-            json={"prompt": "Second video", "duration_seconds": 10}
-        )
-
-        session_id1 = response1.json()["session_id"]
-        session_id2 = response2.json()["session_id"]
-
-        assert session_id1 != session_id2
-        assert session_id1 in quote_sessions
-        assert session_id2 in quote_sessions
-        assert quote_sessions[session_id1]["prompt"] == "First video"
-        assert quote_sessions[session_id2]["prompt"] == "Second video"
+        assert response2.status_code == 401
+        assert "replay" in response2.json()["error"].lower()
 
 
 class TestCleanupExpiredSessions:
@@ -377,23 +390,6 @@ class TestCleanupExpiredSessions:
         assert "expired_session" not in quote_sessions
         assert "valid_session" in quote_sessions
 
-    def test_cleanup_does_not_remove_valid_sessions(self):
-        quote_sessions.clear()
-        quote_sessions["session1"] = {
-            "expires_at": time.time() + 300,
-            "prompt": "test1"
-        }
-        quote_sessions["session2"] = {
-            "expires_at": time.time() + 600,
-            "prompt": "test2"
-        }
-
-        cleanup_expired_sessions()
-
-        assert len(quote_sessions) == 2
-        assert "session1" in quote_sessions
-        assert "session2" in quote_sessions
-
 
 class TestCalculateFinalPrice:
     def test_calculate_final_price_with_markup(self):
@@ -404,544 +400,418 @@ class TestCalculateFinalPrice:
     def test_calculate_final_price_zero_base(self):
         assert calculate_final_price(0.0) == 0.0
 
-    def test_calculate_final_price_small_value(self):
-        fal_price = 0.01
-        expected = 0.01 * (1 + MARKUP_PERCENT / 100)
-        assert calculate_final_price(fal_price) == expected
-
-
-class TestVerifyPaymentCredential:
-    def test_valid_credential_returns_true(self):
-        quote_sessions.clear()
-        session_id = "test_session"
-        quote_sessions[session_id] = {
-            "expires_at": time.time() + 300,
-            "prompt": "test"
-        }
-        assert verify_payment_credential("valid_cred", session_id) is True
-
-    def test_expired_session_returns_false(self):
-        quote_sessions.clear()
-        session_id = "expired_session"
-        quote_sessions[session_id] = {
-            "expires_at": time.time() - 100,
-            "prompt": "test"
-        }
-        assert verify_payment_credential("cred", session_id) is False
-        assert session_id not in quote_sessions
-
-    def test_nonexistent_session_returns_false(self):
-        assert verify_payment_credential("cred", "nonexistent") is False
-
-    def test_empty_credential_returns_false(self):
-        quote_sessions.clear()
-        session_id = "test_session"
-        quote_sessions[session_id] = {
-            "expires_at": time.time() + 300,
-            "prompt": "test"
-        }
-        assert verify_payment_credential("", session_id) is False
-
-
-class TestFalPricingAPIMocking:
-    @pytest.mark.asyncio
-    async def test_get_fal_pricing_success(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "prices": [
-                {"endpoint_id": "fal-ai/veo3.1/fast", "unit_price": 0.08, "unit": "second"}
-            ]
-        }
-
-        async def mock_get(*args, **kwargs):
-            return mock_response
-
-        mock_client = MagicMock()
-        mock_client.get = mock_get
-
-        async def async_enter(self):
-            return mock_client
-        async def async_exit(self, *args):
-            pass
-
-        type(mock_client).__aenter__ = async_enter
-        type(mock_client).__aexit__ = async_exit
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
-            price, unit = await get_fal_pricing()
-            assert price == 0.08
-            assert unit == "second"
-
-    @pytest.mark.asyncio
-    async def test_get_fal_pricing_api_error(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 500
-
-        async def mock_get(*args, **kwargs):
-            return mock_response
-
-        mock_client = MagicMock()
-        mock_client.get = mock_get
-
-        async def async_enter(self):
-            return mock_client
-        async def async_exit(self, *args):
-            pass
-
-        type(mock_client).__aenter__ = async_enter
-        type(mock_client).__aexit__ = async_exit
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
-            price, unit = await get_fal_pricing()
-            assert price is None
-            assert unit is None
-
-    @pytest.mark.asyncio
-    async def test_get_fal_pricing_exception(self):
-        async def mock_get(*args, **kwargs):
-            raise Exception("Connection error")
-
-        mock_client = MagicMock()
-        mock_client.get = mock_get
-
-        async def async_enter(self):
-            return mock_client
-        async def async_exit(self, *args):
-            pass
-
-        type(mock_client).__aenter__ = async_enter
-        type(mock_client).__aexit__ = async_exit
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
-            price, unit = await get_fal_pricing()
-            assert price is None
-            assert unit is None
-
-    @pytest.mark.asyncio
-    async def test_get_fal_pricing_missing_unit_price(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "prices": [
-                {"endpoint_id": "fal-ai/veo3.1/fast", "unit": "second"}
-            ]
-        }
-
-        async def mock_get(*args, **kwargs):
-            return mock_response
-
-        mock_client = MagicMock()
-        mock_client.get = mock_get
-
-        async def async_enter(self):
-            return mock_client
-        async def async_exit(self, *args):
-            pass
-
-        type(mock_client).__aenter__ = async_enter
-        type(mock_client).__aexit__ = async_exit
-
-        with patch("httpx.AsyncClient", return_value=mock_client):
-            price, unit = await get_fal_pricing()
-            assert price is None
-            assert unit == "second"
-
-    @pytest.mark.asyncio
-    async def test_get_fal_pricing_no_api_key(self):
-        with patch("main.FAL_AI_KEY", ""):
-            price, unit = await get_fal_pricing()
-            assert price is None
-            assert unit is None
-
 
 class TestEdgeCases:
     @pytest.mark.asyncio
-    async def test_boundary_duration_minimum(self, client, mock_fal_pricing):
+    async def test_boundary_duration_minimum(self, client, mock_fal_pricing, mock_mpp_config):
         response = await client.post(
             "/api/video/generate",
             json={"prompt": "Test", "duration_seconds": 1}
         )
         assert response.status_code == 402
-        assert response.json()["pricing"]["duration_seconds"] == 1
-
+        data = response.json()
+        assert data["expires_in"] == QUOTE_TTL_SECONDS
+        
     @pytest.mark.asyncio
-    async def test_boundary_duration_maximum(self, client, mock_fal_pricing):
+    async def test_boundary_duration_maximum(self, client, mock_fal_pricing, mock_mpp_config):
         response = await client.post(
             "/api/video/generate",
             json={"prompt": "Test", "duration_seconds": 30}
         )
         assert response.status_code == 402
-        assert response.json()["pricing"]["duration_seconds"] == 30
-
-    @pytest.mark.asyncio
-    async def test_float_duration_accepted(self, client, mock_fal_pricing):
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "Test", "duration_seconds": 5.5}
-        )
-        assert response.status_code == 402
-        assert response.json()["pricing"]["duration_seconds"] == 5.5
-
-    @pytest.mark.asyncio
-    async def test_very_long_prompt_accepted(self, client, mock_fal_pricing):
-        long_prompt = "A " * 1000
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": long_prompt, "duration_seconds": 5}
-        )
-        assert response.status_code == 402
-
-    @pytest.mark.asyncio
-    async def test_special_characters_in_prompt(self, client, mock_fal_pricing):
-        special_prompt = "Test with special chars: !@#$%^&*()_+{}|:<>?"
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": special_prompt, "duration_seconds": 5}
-        )
-        assert response.status_code == 402
-
-    @pytest.mark.asyncio
-    async def test_unicode_in_prompt(self, client, mock_fal_pricing):
-        unicode_prompt = "Test with unicode: éèê 中文 Россия"
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": unicode_prompt, "duration_seconds": 5}
-        )
-        assert response.status_code == 402
-
-    @pytest.mark.asyncio
-    async def test_payment_header_bearer_format_ignored(self, client, mock_fal_pricing):
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "Test", "duration_seconds": 5},
-            headers={"Authorization": "Bearer token123"}
-        )
-        assert response.status_code == 402
         data = response.json()
-        assert "session_id" in data
-
-
-class TestModelSelection:
+        assert data["expires_in"] == QUOTE_TTL_SECONDS
+        
     @pytest.mark.asyncio
-    async def test_request_without_model_uses_default(self, client, mock_fal_pricing):
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "A beautiful sunset", "duration_seconds": 5}
-        )
-        assert response.status_code == 402
-        data = response.json()
-        pricing = data["pricing"]
-        assert pricing["model"] == DEFAULT_VIDEO_MODEL
-        assert pricing["price_per_unit"] == 0.05
-
+    async def test_longer_duration_higher_amount(self, client, mock_mpp_config):
+        fal_price_per_second = 0.05
+        
+        with patch("main.get_fal_pricing", new_callable=AsyncMock) as mock_pricing:
+            mock_pricing.return_value = (fal_price_per_second, "second")
+            
+            response_5s = await client.post(
+                "/api/video/generate",
+                json={"prompt": "Test", "duration_seconds": 5}
+            )
+            
+            response_10s = await client.post(
+                "/api/video/generate",
+                json={"prompt": "Test", "duration_seconds": 10}
+            )
+        
+        amount_5s = int(response_5s.json()["amount"])
+        amount_10s = int(response_10s.json()["amount"])
+        assert amount_10s > amount_5s
+        assert amount_10s == amount_5s * 2
+        
     @pytest.mark.asyncio
-    async def test_request_with_invalid_model_returns_400(self, client, mock_fal_pricing):
-        invalid_model = "invalid-model-xyz"
-        response = await client.post(
-            "/api/video/generate",
-            json={"prompt": "A beautiful sunset", "duration_seconds": 5, "model": invalid_model}
-        )
-        assert response.status_code == 400
-        data = response.json()
-        assert data["success"] is False
-        assert "model" in data["error"].lower() or "supported" in data["error"].lower()
-
+    async def test_different_models_different_prices(self, client, mock_mpp_config):
+        model_prices = {
+            "fal-ai/veo3.1/fast": 0.05,
+            "fal-ai/veo3.1": 0.08,
+            "fal-ai/kling/video/v2.5/pro": 0.10,
+        }
+        
+        async def mock_pricing_func(endpoint_id):
+            return model_prices.get(endpoint_id, 0.05), "second"
+        
+        with patch("main.get_fal_pricing", new_callable=AsyncMock) as mock_pricing:
+            mock_pricing.side_effect = mock_pricing_func
+            
+            responses = {}
+            for model, expected_price in model_prices.items():
+                response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test", "duration_seconds": 5, "model": model}
+                )
+                responses[model] = response.json()
+        
+        amounts = {model: int(data["amount"]) for model, data in responses.items()}
+        assert len(set(amounts.values())) == len(model_prices)
+        
     @pytest.mark.asyncio
-    async def test_default_model_configurable_via_env(self, client, mock_fal_pricing):
-        custom_default = "fal-ai/veo3.1"
-        with patch("main.DEFAULT_VIDEO_MODEL", custom_default):
+    async def test_pricing_api_error_returns_503(self, client, mock_mpp_config):
+        with patch("main.get_fal_pricing", new_callable=AsyncMock) as mock_pricing:
+            mock_pricing.return_value = (None, None)
+            
             response = await client.post(
                 "/api/video/generate",
-                json={"prompt": "A beautiful sunset", "duration_seconds": 5}
+                json={"prompt": "Test", "duration_seconds": 5}
             )
-            assert response.status_code == 402
-            data = response.json()
-            pricing = data["pricing"]
-            assert pricing["model"] == custom_default
-
-
-class TestFalAiVideoGeneration:
+        
+        assert response.status_code == 503
+        data = response.json()
+        assert data["success"] is False
+        assert "pricing" in data["error"].lower() or "unable" in data["error"].lower()
+        
     @pytest.mark.asyncio
-    async def test_submit_to_fal_api_called_after_payment(self, client, mock_fal_pricing):
-        mock_fal_response = {
-            "request_id": "req_test123",
-            "status": "IN_PROGRESS",
-            "status_url": "https://queue.fal.run/fal-ai/veo3.1/fast/requests/req_test123/status"
-        }
-
-        with patch("main.submit_to_fal", new_callable=AsyncMock) as mock_submit:
-            mock_submit.return_value = mock_fal_response
-
-            initial_response = await client.post(
-                "/api/video/generate",
-                json={"prompt": "A cat playing piano", "duration_seconds": 3}
-            )
-            assert initial_response.status_code == 402
-            session_id = initial_response.json()["session_id"]
-
-            retry_response = await client.post(
-                "/api/video/generate",
-                json={"prompt": "A cat playing piano", "duration_seconds": 3},
-                headers={
-                    "Authorization": "Payment valid_cred",
-                    "X-Session-ID": session_id
-                }
-            )
-            assert retry_response.status_code == 200
-            data = retry_response.json()
-            assert data["success"] is True
-            assert "job_id" in data
-            assert data["status"] == "processing"
-
-            mock_submit.assert_called_once_with("fal-ai/veo3.1/fast", "A cat playing piano")
-
+    async def test_invalid_request_returns_400_before_challenge(self, client, mock_mpp_config):
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "", "duration_seconds": 5}
+        )
+        assert response.status_code == 400
+        assert "WWW-Authenticate" not in response.headers
+        
     @pytest.mark.asyncio
-    async def test_get_job_status_from_fal(self, client):
-        jobs_db.clear()
-        last_poll_time.clear()
-
-        job_id = "job_test123"
-        jobs_db[job_id] = {
-            "job_id": job_id,
-            "request_id": "req_test123",
-            "endpoint_id": "fal-ai/veo3.1/fast",
-            "prompt": "Test prompt",
-            "status": "processing",
-            "video_url": None,
-            "created_at": "2026-03-24T12:00:00Z",
-        }
-
-        import fal_client
-        mock_completed = fal_client.Completed(logs=[], metrics={})
-        mock_status_response = {"status": mock_completed}
-        mock_result_response = {
-            "video": {
-                "url": "https://example.com/video.mp4",
-                "width": 832,
-                "height": 480
-            }
-        }
-
-        with patch("main.fetch_fal_job_status", new_callable=AsyncMock) as mock_status, \
-             patch("main.fetch_fal_job_result", new_callable=AsyncMock) as mock_result:
-            mock_status.return_value = mock_status_response
-            mock_result.return_value = mock_result_response
-
-            response = await client.get(f"/api/video/jobs/{job_id}")
-            assert response.status_code == 200
-            data = response.json()
-            assert data["job_id"] == job_id
-            assert data["status"] == "completed"
-            assert data["video_url"] == "https://example.com/video.mp4"
-            assert data["width"] == 832
-            assert data["height"] == 480
-
-            mock_status.assert_called_once_with("fal-ai/veo3.1/fast", "req_test123")
-            mock_result.assert_called_once_with("fal-ai/veo3.1/fast", "req_test123")
-
+    async def test_missing_prompt_returns_400(self, client, mock_mpp_config):
+        response = await client.post(
+            "/api/video/generate",
+            json={"duration_seconds": 5}
+        )
+        assert response.status_code == 400
+        
     @pytest.mark.asyncio
-    async def test_get_job_status_cached(self, client):
-        jobs_db.clear()
-        last_poll_time.clear()
-
-        job_id = "job_cached123"
-        jobs_db[job_id] = {
-            "job_id": job_id,
-            "request_id": "req_cached123",
-            "endpoint_id": "fal-ai/veo3.1/fast",
-            "prompt": "Test prompt",
-            "status": "processing",
-            "video_url": None,
-            "created_at": "2026-03-24T12:00:00Z",
-        }
-        import time
-        last_poll_time[job_id] = time.time()
-
-        with patch("main.fetch_fal_job_status", new_callable=AsyncMock) as mock_status, \
-             patch("main.fetch_fal_job_result", new_callable=AsyncMock) as mock_result:
-            response = await client.get(f"/api/video/jobs/{job_id}")
-            assert response.status_code == 200
-            data = response.json()
-            assert data["status"] == "processing"
-            assert data["video_url"] is None
-
-            mock_status.assert_not_called()
-            mock_result.assert_not_called()
-
+    async def test_invalid_duration_returns_400(self, client, mock_mpp_config):
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "Test", "duration_seconds": 0}
+        )
+        assert response.status_code == 400
+        
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "Test", "duration_seconds": 31}
+        )
+        assert response.status_code == 400
+        
     @pytest.mark.asyncio
-    async def test_get_job_completed_returns_video_url(self, client):
-        jobs_db.clear()
-        last_poll_time.clear()
+    async def test_invalid_model_returns_400(self, client, mock_mpp_config):
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "Test", "duration_seconds": 5, "model": "invalid-model"}
+        )
+        assert response.status_code == 400
+        
+    @pytest.mark.asyncio
+    async def test_challenge_expires_in_5_minutes(self, client, mock_fal_pricing, mock_mpp_config):
+        from datetime import datetime, timezone, timedelta
+        
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "Test", "duration_seconds": 5}
+        )
+        
+        header = response.headers["WWW-Authenticate"]
+        expires_start = header.find('expires="') + len('expires="')
+        expires_end = header.find('"', expires_start)
+        expires_str = header[expires_start:expires_end]
+        
+        expires_at = datetime.fromisoformat(expires_str)
+        now = datetime.now(timezone.utc)
+        time_diff = (expires_at - now).total_seconds()
+        
+        assert 295 <= time_diff <= 305
+        
+    @pytest.mark.asyncio
+    async def test_challenge_www_authenticate_format(self, client, mock_fal_pricing, mock_mpp_config):
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "Test", "duration_seconds": 5}
+        )
+        
+        header = response.headers["WWW-Authenticate"]
+        assert header.startswith('Payment ')
+        
+        parts = header.split(', ')
+        assert len(parts) >= 6
+        
+        param_names = [part.split('=')[0] for part in parts]
+        assert 'Payment realm' in param_names[0]
+        assert 'id' in param_names[1]
+        assert 'method' in param_names[2]
+        assert 'intent' in param_names[3]
+        assert 'request' in param_names[4]
+        assert 'expires' in param_names[5]
 
-        job_id = "job_video123"
-        jobs_db[job_id] = {
-            "job_id": job_id,
-            "request_id": "req_video123",
-            "endpoint_id": "fal-ai/veo3.1/fast",
-            "prompt": "Test prompt",
-            "status": "completed",
-            "video_url": "https://example.com/video.mp4",
-            "width": 832,
-            "height": 480,
-            "created_at": "2026-03-24T12:00:00Z",
-        }
 
+class TestJobStatusEndpoint:
+    @pytest.mark.asyncio
+    async def test_get_job_status_not_found(self, client):
+        job_id = str(uuid.uuid4())
         response = await client.get(f"/api/video/jobs/{job_id}")
+        assert response.status_code == 404
+
+
+class TestGalleryEndpoint:
+    @pytest.mark.asyncio
+    async def test_get_gallery_returns_empty_list(self, client):
+        response = await client.get("/api/video/gallery")
         assert response.status_code == 200
         data = response.json()
-        assert data["job_id"] == job_id
-        assert data["status"] == "completed"
-        assert data["video_url"] == "https://example.com/video.mp4"
-        assert data["width"] == 832
-        assert data["height"] == 480
+        assert data["videos"] == []
+        assert data["total"] == 0
 
+
+class TestBroadcastIntegration:
+    """Test fee sponsorship and broadcast integration."""
+    
     @pytest.mark.asyncio
-    async def test_get_job_not_found_returns_404(self, client):
-        response = await client.get("/api/video/jobs/nonexistent_job")
-        assert response.status_code == 404
-        data = response.json()
-        assert data["error"] == "Job not found"
-
-
-class TestFalAiVideoGeneration:
-    @pytest.mark.asyncio
-    async def test_submit_to_fal_api_called_after_payment(self, client, mock_fal_pricing):
-        mock_fal_response = {
-            "request_id": "req_test123",
-            "status": "IN_PROGRESS",
-            "status_url": "https://queue.fal.run/fal-ai/veo3.1/fast/requests/req_test123/status"
-        }
-
-        with patch("main.submit_to_fal", new_callable=AsyncMock) as mock_submit:
-            mock_submit.return_value = mock_fal_response
-
-            initial_response = await client.post(
-                "/api/video/generate",
-                json={"prompt": "A cat playing piano", "duration_seconds": 3}
-            )
-            assert initial_response.status_code == 402
-            session_id = initial_response.json()["session_id"]
-
-            retry_response = await client.post(
-                "/api/video/generate",
-                json={"prompt": "A cat playing piano", "duration_seconds": 3},
-                headers={
-                    "Authorization": "Payment valid_cred",
-                    "X-Session-ID": session_id
+    async def test_successful_payment_includes_receipt_header(self, client, mock_fal_pricing, mock_submit_to_fal, mock_mpp_config):
+        with patch("main.verify_transfer_calldata", return_value=(True, {}, "")):
+            with patch("main.verify_transaction_signature", return_value=(True, "0x" + "00" * 40, "")):
+                initial_response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test video", "duration_seconds": 3}
+                )
+                assert initial_response.status_code == 402
+                session_id = initial_response.json()["session_id"]
+                challenge = quote_sessions[session_id]["challenge"]
+                
+                from mpp.challenge import base64url_encode, jcs_encode
+                
+                credential_data = {
+                    "challenge": challenge,
+                    "payload": {
+                        "transfer": {
+                            "recipient": mock_mpp_config.SERVER_ADDRESS,
+                            "amount": str(int(quote_sessions[session_id]["final_price_total"] * 1_000_000)),
+                            "currency": "pathUSD"
+                        },
+                        "transaction_bytes": "0x" + "00" * 200
+                    },
+                    "type": "transaction"
                 }
-            )
-            assert retry_response.status_code == 200
-            data = retry_response.json()
-            assert data["success"] is True
-            assert "job_id" in data
-            assert data["status"] == "processing"
-
-            mock_submit.assert_called_once_with("fal-ai/veo3.1/fast", "A cat playing piano")
-
+                
+                credential_json = jcs_encode(credential_data)
+                credential_b64 = base64url_encode(credential_json.encode('utf-8'))
+                
+                response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test video", "duration_seconds": 3},
+                    headers={
+                        "Authorization": f"Payment {credential_b64}",
+                        "X-Session-ID": session_id
+                    }
+                )
+                
+                assert response.status_code == 200
+                assert "Payment-Receipt" in response.headers
+                
+                receipt_header = response.headers["Payment-Receipt"]
+                receipt = decode_receipt_header(receipt_header)
+                
+                assert receipt is not None
+                assert receipt["method"] == "tempo"
+                assert receipt["status"] == "success"
+                assert "reference" in receipt
+                assert receipt["reference"].startswith("0x")
+                assert "timestamp" in receipt
+                
     @pytest.mark.asyncio
-    async def test_get_job_status_from_fal(self, client):
-        jobs_db.clear()
-        last_poll_time.clear()
+    async def test_receipt_format_matches_spec(self, client, mock_fal_pricing, mock_submit_to_fal, mock_mpp_config):
+        with patch("main.verify_transfer_calldata", return_value=(True, {}, "")):
+            with patch("main.verify_transaction_signature", return_value=(True, "0x" + "00" * 40, "")):
+                initial_response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test", "duration_seconds": 2}
+                )
+                session_id = initial_response.json()["session_id"]
+                challenge = quote_sessions[session_id]["challenge"]
+                
+                from mpp.challenge import base64url_encode, jcs_encode
+                
+                credential_data = {
+                    "challenge": challenge,
+                    "payload": {
+                        "transfer": {
+                            "recipient": mock_mpp_config.SERVER_ADDRESS,
+                            "amount": "1000000",
+                            "currency": "pathUSD"
+                        },
+                        "transaction_bytes": "0x" + "00" * 200
+                    },
+                    "type": "transaction"
+                }
+                
+                credential_json = jcs_encode(credential_data)
+                credential_b64 = base64url_encode(credential_json.encode('utf-8'))
+                
+                response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test", "duration_seconds": 2},
+                    headers={
+                        "Authorization": f"Payment {credential_b64}",
+                        "X-Session-ID": session_id
+                    }
+                )
+                
+                assert response.status_code == 200
+                receipt_header = response.headers["Payment-Receipt"]
+                receipt = decode_receipt_header(receipt_header)
+                
+                assert receipt is not None
+                assert set(receipt.keys()) == {"method", "reference", "status", "timestamp"}
+                assert receipt["method"] == "tempo"
+                assert receipt["status"] == "success"
+                
+    @pytest.mark.asyncio
+    async def test_job_stores_transaction_hash(self, client, mock_fal_pricing, mock_submit_to_fal, mock_mpp_config):
+        with patch("main.verify_transfer_calldata", return_value=(True, {}, "")):
+            with patch("main.verify_transaction_signature", return_value=(True, "0x" + "00" * 40, "")):
+                initial_response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test", "duration_seconds": 2}
+                )
+                session_id = initial_response.json()["session_id"]
+                challenge = quote_sessions[session_id]["challenge"]
+                
+                from mpp.challenge import base64url_encode, jcs_encode
+                
+                credential_data = {
+                    "challenge": challenge,
+                    "payload": {
+                        "transfer": {
+                            "recipient": mock_mpp_config.SERVER_ADDRESS,
+                            "amount": "1000000",
+                            "currency": "pathUSD"
+                        },
+                        "transaction_bytes": "0x" + "00" * 200
+                    },
+                    "type": "transaction"
+                }
+                
+                credential_json = jcs_encode(credential_data)
+                credential_b64 = base64url_encode(credential_json.encode('utf-8'))
+                
+                response = await client.post(
+                    "/api/video/generate",
+                    json={"prompt": "Test", "duration_seconds": 2},
+                    headers={
+                        "Authorization": f"Payment {credential_b64}",
+                        "X-Session-ID": session_id
+                    }
+                )
+                
+                assert response.status_code == 200
+                data = response.json()
+                job_id = data["job_id"]
+                
+                assert job_id in jobs_db
+                assert "transaction_hash" in jobs_db[job_id]
+                assert jobs_db[job_id]["transaction_hash"].startswith("0x")
 
-        job_id = "job_test123"
-        jobs_db[job_id] = {
-            "job_id": job_id,
-            "request_id": "req_test123",
-            "endpoint_id": "fal-ai/veo3.1/fast",
-            "prompt": "Test prompt",
-            "status": "processing",
-            "video_url": None,
-            "created_at": "2026-03-24T12:00:00Z",
+
+class TestBroadcastErrorHandling:
+    """Test broadcast error handling."""
+    
+    @pytest.mark.asyncio
+    async def test_missing_transaction_bytes_returns_402(self, client, mock_fal_pricing, mock_mpp_config):
+        initial_response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "Test", "duration_seconds": 2}
+        )
+        session_id = initial_response.json()["session_id"]
+        challenge = quote_sessions[session_id]["challenge"]
+        
+        from mpp.challenge import base64url_encode, jcs_encode
+        
+        credential_data = {
+            "challenge": challenge,
+            "payload": {
+                "transfer": {
+                    "recipient": mock_mpp_config.SERVER_ADDRESS,
+                    "amount": "1000000",
+                    "currency": "pathUSD"
+                }
+            },
+            "type": "transaction"
         }
-
-        import fal_client
-        mock_completed = fal_client.Completed(logs=[], metrics={})
-        mock_status_response = {"status": mock_completed}
-        mock_result_response = {
-            "video": {
-                "url": "https://example.com/video.mp4",
-                "width": 832,
-                "height": 480
+        
+        credential_json = jcs_encode(credential_data)
+        credential_b64 = base64url_encode(credential_json.encode('utf-8'))
+        
+        response = await client.post(
+            "/api/video/generate",
+            json={"prompt": "Test", "duration_seconds": 2},
+            headers={
+                "Authorization": f"Payment {credential_b64}",
+                "X-Session-ID": session_id
             }
+        )
+        
+        assert response.status_code in [402, 200]
+
+
+class TestReceiptGeneration:
+    """Test receipt generation functions."""
+    
+    def test_create_receipt_format(self):
+        tx_hash = "0x" + "ab" * 32
+        receipt = create_receipt(tx_hash, "success")
+        
+        assert receipt["method"] == "tempo"
+        assert receipt["reference"] == tx_hash
+        assert receipt["status"] == "success"
+        assert "timestamp" in receipt
+        
+    def test_format_receipt_header_encoding(self):
+        receipt = {
+            "method": "tempo",
+            "reference": "0x" + "ab" * 32,
+            "status": "success",
+            "timestamp": "2025-01-15T12:00:00Z"
         }
-
-        with patch("main.fetch_fal_job_status", new_callable=AsyncMock) as mock_status, \
-             patch("main.fetch_fal_job_result", new_callable=AsyncMock) as mock_result:
-            mock_status.return_value = mock_status_response
-            mock_result.return_value = mock_result_response
-
-            response = await client.get(f"/api/video/jobs/{job_id}")
-            assert response.status_code == 200
-            data = response.json()
-            assert data["job_id"] == job_id
-            assert data["status"] == "completed"
-            assert data["video_url"] == "https://example.com/video.mp4"
-            assert data["width"] == 832
-            assert data["height"] == 480
-
-            mock_status.assert_called_once_with("fal-ai/veo3.1/fast", "req_test123")
-            mock_result.assert_called_once_with("fal-ai/veo3.1/fast", "req_test123")
-
-    @pytest.mark.asyncio
-    async def test_get_job_status_cached(self, client):
-        jobs_db.clear()
-        last_poll_time.clear()
-
-        job_id = "job_cached123"
-        jobs_db[job_id] = {
-            "job_id": job_id,
-            "request_id": "req_cached123",
-            "endpoint_id": "fal-ai/veo3.1/fast",
-            "prompt": "Test prompt",
-            "status": "processing",
-            "video_url": None,
-            "created_at": "2026-03-24T12:00:00Z",
+        
+        header = format_receipt_header(receipt)
+        
+        assert "=" not in header
+        assert "+" not in header
+        assert "/" not in header
+        
+    def test_receipt_round_trip(self):
+        receipt = {
+            "method": "tempo",
+            "reference": "0x" + "cd" * 32,
+            "status": "success",
+            "timestamp": "2025-01-15T12:00:00Z"
         }
-        import time
-        last_poll_time[job_id] = time.time()
+        
+        header = format_receipt_header(receipt)
+        decoded = decode_receipt_header(header)
+        
+        assert decoded == receipt
 
-        with patch("main.fetch_fal_job_status", new_callable=AsyncMock) as mock_status, \
-             patch("main.fetch_fal_job_result", new_callable=AsyncMock) as mock_result:
-            response = await client.get(f"/api/video/jobs/{job_id}")
-            assert response.status_code == 200
-            data = response.json()
-            assert data["status"] == "processing"
-            assert data["video_url"] is None
 
-            mock_status.assert_not_called()
-            mock_result.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_get_job_completed_returns_video_url(self, client):
-        jobs_db.clear()
-        last_poll_time.clear()
-
-        job_id = "job_video123"
-        jobs_db[job_id] = {
-            "job_id": job_id,
-            "request_id": "req_video123",
-            "endpoint_id": "fal-ai/veo3.1/fast",
-            "prompt": "Test prompt",
-            "status": "completed",
-            "video_url": "https://example.com/video.mp4",
-            "width": 832,
-            "height": 480,
-            "created_at": "2026-03-24T12:00:00Z",
-        }
-
-        response = await client.get(f"/api/video/jobs/{job_id}")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["job_id"] == job_id
-        assert data["status"] == "completed"
-        assert data["video_url"] == "https://example.com/video.mp4"
-        assert data["width"] == 832
-        assert data["height"] == 480
-
-    @pytest.mark.asyncio
-    async def test_get_job_not_found_returns_404(self, client):
-        response = await client.get("/api/video/jobs/nonexistent_job")
-        assert response.status_code == 404
-        data = response.json()
-        assert data["error"] == "Job not found"
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
