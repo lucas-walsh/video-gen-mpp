@@ -21,7 +21,7 @@ sequenceDiagram
     participant Tempo as Tempo Blockchain
     participant FAL as FAL AI
 
-    Client->>Server: POST /api/video/generate {prompt, duration, model}
+    Client->>Server: POST /api/video/generate (prompt, duration, model)
     Server->>FAL: Fetch model pricing
     FAL-->>Server: Price per second
     Server-->>Client: 402 Payment Required + WWW-Authenticate challenge
@@ -30,7 +30,7 @@ sequenceDiagram
     Note over Client: Create TIP-20 transfer transaction
     Note over Client: Sign transaction locally (domain 0x76)
 
-    Client->>Server: POST /api/video/generate + Authorization: Payment <credential>
+    Client->>Server: POST /api/video/generate + Authorization header
 
     Note over Server: Verify challenge binding (HMAC-SHA256)
     Note over Server: Verify signature, amount, recipient
@@ -42,13 +42,13 @@ sequenceDiagram
     Server->>FAL: Submit video generation job
     FAL-->>Server: Job ID
 
-    Server-->>Client: 200 OK {job_id, status, tx_hash, cost}
+    Server-->>Client: 200 OK (job_id, status, tx_hash, cost)
 
     loop Poll for completion
-        Client->>Server: GET /api/video/jobs/{job_id}
+        Client->>Server: GET /api/video/jobs/job_id
         Server->>FAL: Check job status
         FAL-->>Server: Status / result
-        Server-->>Client: {status, video_url}
+        Server-->>Client: status, video_url
     end
 ```
 
