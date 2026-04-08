@@ -89,7 +89,7 @@ async def test_challenge_generation(result: TestResult):
         
         challenge = create_challenge(
             amount=0.50,
-            recipient=config.SERVER_ADDRESS,
+            recipient=config.TEMPO_SERVER_ADDRESS,
             realm="video-gen-api",
             method="tempo",
             currency="pathUSD",
@@ -107,7 +107,7 @@ async def test_challenge_generation(result: TestResult):
         request_params = decode_challenge_request(challenge)
         assert request_params is not None, "Failed to decode challenge request"
         assert float(request_params["amount"]) == 0.50, "Amount mismatch"
-        assert request_params["recipient"] == config.SERVER_ADDRESS, "Recipient mismatch"
+        assert request_params["recipient"] == config.TEMPO_SERVER_ADDRESS, "Recipient mismatch"
         
         binding_valid = verify_challenge_binding(challenge, config.MPP_SECRET_KEY)
         assert binding_valid, "HMAC binding verification failed"
@@ -132,7 +132,7 @@ async def test_credential_creation_and_verification(result: TestResult):
         
         challenge = create_challenge(
             amount=0.50,
-            recipient=config.SERVER_ADDRESS,
+            recipient=config.TEMPO_SERVER_ADDRESS,
             realm="video-gen-api",
             method="tempo",
             currency="pathUSD",
@@ -148,7 +148,7 @@ async def test_credential_creation_and_verification(result: TestResult):
             challenge=challenge,
             transaction_hash=mock_tx_hash,
             transfer_params={
-                "recipient": config.SERVER_ADDRESS,
+                "recipient": config.TEMPO_SERVER_ADDRESS,
                 "amount": "0.50",
                 "currency": "pathUSD",
             },
@@ -228,7 +228,7 @@ async def test_full_payment_flow(result: TestResult):
                 challenge=challenge,
                 transaction_hash=mock_tx_hash,
                 transfer_params={
-                    "recipient": config.SERVER_ADDRESS,
+                    "recipient": config.TEMPO_SERVER_ADDRESS,
                     "amount": str(stored_session["final_price_total"]),
                     "currency": "pathUSD",
                 },
@@ -344,7 +344,7 @@ async def test_replay_prevention(result: TestResult):
         
         challenge = create_challenge(
             amount=0.50,
-            recipient=config.SERVER_ADDRESS,
+            recipient=config.TEMPO_SERVER_ADDRESS,
             realm="video-gen-api",
             method="tempo",
             currency="pathUSD",
@@ -358,7 +358,7 @@ async def test_replay_prevention(result: TestResult):
             challenge=challenge,
             transaction_hash=mock_tx_hash,
             transfer_params={
-                "recipient": config.SERVER_ADDRESS,
+                "recipient": config.TEMPO_SERVER_ADDRESS,
                 "amount": "0.50",
                 "currency": "pathUSD",
             },
@@ -407,7 +407,7 @@ async def test_challenge_expiration(result: TestResult):
         
         challenge = create_challenge(
             amount=0.50,
-            recipient=config.SERVER_ADDRESS,
+            recipient=config.TEMPO_SERVER_ADDRESS,
             realm="video-gen-api",
             method="tempo",
             currency="pathUSD",
@@ -421,7 +421,7 @@ async def test_challenge_expiration(result: TestResult):
         
         challenge_future = create_challenge(
             amount=0.50,
-            recipient=config.SERVER_ADDRESS,
+            recipient=config.TEMPO_SERVER_ADDRESS,
             realm="video-gen-api",
             method="tempo",
             currency="pathUSD",

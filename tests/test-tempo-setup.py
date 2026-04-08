@@ -14,7 +14,7 @@ Prints "Phase 1 OK" if all tests pass.
 import sys
 import os
 
-os.environ["SERVER_PRIVATE_KEY"] = "0x" + "01" * 32
+os.environ["TEMPO_SERVER_PRIVATE_KEY"] = "0x" + "01" * 32
 os.environ["MPP_SECRET_KEY"] = "test-secret-key-for-hmac"
 os.environ["TEMPO_RPC_URL"] = "https://rpc.testnet.tempo.xyz"
 os.environ["PATHUSD_ADDRESS"] = "0x20c0000000000000000000000000000000000000"
@@ -44,9 +44,9 @@ def test_config_loading() -> bool:
         assert hasattr(config, "TEMPO_RPC_URL"), "Missing TEMPO_RPC_URL"
         print(f"  TEMPO_RPC_URL: {config.TEMPO_RPC_URL}")
 
-        assert hasattr(config, "SERVER_PRIVATE_KEY"), "Missing SERVER_PRIVATE_KEY"
-        pk_display = '***' + config.SERVER_PRIVATE_KEY[-4:] if config.SERVER_PRIVATE_KEY else 'NOT SET'
-        print(f"  SERVER_PRIVATE_KEY: {pk_display}")
+        assert hasattr(config, "TEMPO_SERVER_PRIVATE_KEY"), "Missing TEMPO_SERVER_PRIVATE_KEY"
+        pk_display = '***' + config.TEMPO_SERVER_PRIVATE_KEY[-4:] if config.TEMPO_SERVER_PRIVATE_KEY else 'NOT SET'
+        print(f"  TEMPO_SERVER_PRIVATE_KEY: {pk_display}")
 
         assert hasattr(config, "PATHUSD_ADDRESS"), "Missing PATHUSD_ADDRESS"
         print(f"  PATHUSD_ADDRESS: {config.PATHUSD_ADDRESS}")
@@ -78,15 +78,15 @@ def test_wallet_derivation() -> bool:
         reset_config()
 
         config = MPPConfig()
-        print(f"  Test Private Key: {config.SERVER_PRIVATE_KEY[:10]}...")
-        print(f"  Derived Address: {config.SERVER_ADDRESS}")
+        print(f"  Test Private Key: {config.TEMPO_SERVER_PRIVATE_KEY[:10]}...")
+        print(f"  Derived Address: {config.TEMPO_TEMPO_SERVER_ADDRESS}")
 
-        assert config.SERVER_ADDRESS.startswith("0x"), "Address should start with 0x"
-        assert len(config.SERVER_ADDRESS) == 42, "Address should be 42 characters"
+        assert config.TEMPO_TEMPO_SERVER_ADDRESS.startswith("0x"), "Address should start with 0x"
+        assert len(config.TEMPO_TEMPO_SERVER_ADDRESS) == 42, "Address should be 42 characters"
 
-        expected_address = Account.from_key(config.SERVER_PRIVATE_KEY).address
+        expected_address = Account.from_key(config.TEMPO_SERVER_PRIVATE_KEY).address
         print(f"  Expected Address: {expected_address}")
-        assert config.SERVER_ADDRESS == expected_address, "Account address should match"
+        assert config.TEMPO_TEMPO_SERVER_ADDRESS == expected_address, "Account address should match"
 
         print("\n✓ Wallet derivation PASSED")
         return True
@@ -111,7 +111,7 @@ def test_mock_rpc_client() -> bool:
         client = MockTempoRPCClient()
         print("✓ MockTempoRPCClient instantiated")
 
-        response = client.call("eth_getBalance", [config.SERVER_ADDRESS])
+        response = client.call("eth_getBalance", [config.TEMPO_TEMPO_SERVER_ADDRESS])
         print(f"  eth_getBalance result:")
         print(f"    Response: {response.result}")
         print(f"    Error: {response.error}")
@@ -148,7 +148,7 @@ def test_mock_rpc_token_balance() -> bool:
         client = MockTempoRPCClient()
 
         pathusd_balance = client.get_token_balance(
-            config.SERVER_ADDRESS,
+            config.TEMPO_TEMPO_SERVER_ADDRESS,
             config.PATHUSD_ADDRESS
         )
         print(f"  pathUSD balance: {pathusd_balance}")
@@ -245,14 +245,14 @@ def test_mock_set_balance() -> bool:
         custom_pathusd = 500 * 10 ** 6
 
         client.set_balance(
-            config.SERVER_ADDRESS,
+            config.TEMPO_TEMPO_SERVER_ADDRESS,
             temp_balance=custom_temp,
             pathusd_balance=custom_pathusd
         )
 
-        temp_balance = client.get_token_balance(config.SERVER_ADDRESS)
+        temp_balance = client.get_token_balance(config.TEMPO_TEMPO_SERVER_ADDRESS)
         pathusd_balance = client.get_token_balance(
-            config.SERVER_ADDRESS,
+            config.TEMPO_TEMPO_SERVER_ADDRESS,
             config.PATHUSD_ADDRESS
         )
 
@@ -290,11 +290,11 @@ def test_spec_compliance() -> bool:
         assert hasattr(config, "TEMPO_RPC_URL"), "Missing TEMPO_RPC_URL"
         print("  ✓ TEMPO_RPC_URL configured")
 
-        assert hasattr(config, "SERVER_PRIVATE_KEY"), "Missing SERVER_PRIVATE_KEY"
-        print("  ✓ SERVER_PRIVATE_KEY configured")
+        assert hasattr(config, "TEMPO_SERVER_PRIVATE_KEY"), "Missing TEMPO_SERVER_PRIVATE_KEY"
+        print("  ✓ TEMPO_SERVER_PRIVATE_KEY configured")
 
-        assert hasattr(config, "SERVER_ADDRESS"), "Missing SERVER_ADDRESS"
-        print("  ✓ SERVER_ADDRESS derived from private key")
+        assert hasattr(config, "TEMPO_SERVER_ADDRESS"), "Missing TEMPO_SERVER_ADDRESS"
+        print("  ✓ TEMPO_SERVER_ADDRESS derived from private key")
 
         assert hasattr(config, "PATHUSD_ADDRESS"), "Missing PATHUSD_ADDRESS"
         print("  ✓ PATHUSD_ADDRESS configured (TIP-20 token)")
@@ -330,10 +330,10 @@ def test_config_validation() -> bool:
         from mpp.config import MPPConfig
         import os
 
-        old_key = os.environ.get("SERVER_PRIVATE_KEY", "")
+        old_key = os.environ.get("TEMPO_SERVER_PRIVATE_KEY", "")
 
         try:
-            os.environ["SERVER_PRIVATE_KEY"] = ""
+            os.environ["TEMPO_SERVER_PRIVATE_KEY"] = ""
 
             try:
                 config = MPPConfig(
@@ -344,16 +344,16 @@ def test_config_validation() -> bool:
                 )
                 assert False, "Should have raised ValueError"
             except ValueError as e:
-                assert "SERVER_PRIVATE_KEY is required" in str(e)
+                assert "TEMPO_SERVER_PRIVATE_KEY is required" in str(e)
                 print(f"  ✓ Validation correctly rejects missing private key")
 
-            os.environ["SERVER_PRIVATE_KEY"] = old_key
+            os.environ["TEMPO_SERVER_PRIVATE_KEY"] = old_key
 
             print("\n✓ Config validation PASSED")
             return True
 
         finally:
-            os.environ["SERVER_PRIVATE_KEY"] = old_key
+            os.environ["TEMPO_SERVER_PRIVATE_KEY"] = old_key
 
     except Exception as e:
         print(f"\n✗ Config validation FAILED: {e}")

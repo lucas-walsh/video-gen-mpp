@@ -193,7 +193,7 @@ class TestVideoGenerationWithPayment:
                     "challenge": challenge,
                     "payload": {
                         "transfer": {
-                            "recipient": mock_mpp_config.SERVER_ADDRESS,
+                            "recipient": mock_mpp_config.TEMPO_SERVER_ADDRESS,
                             "amount": str(int(quote_sessions[session_id]["final_price_total"] * 1_000_000)),
                             "currency": "pathUSD"
                         },
@@ -234,7 +234,7 @@ class TestVideoGenerationWithPayment:
                 credential_data = {
                     "challenge": quote_sessions[session_id]["challenge"],
                     "payload": {
-                        "transfer": {"recipient": mock_mpp_config.SERVER_ADDRESS, "amount": "1000000", "currency": "pathUSD"},
+                        "transfer": {"recipient": mock_mpp_config.TEMPO_SERVER_ADDRESS, "amount": "1000000", "currency": "pathUSD"},
                         "transaction_bytes": "0x" + "00" * 200
                     },
                     "type": "transaction"
@@ -261,7 +261,7 @@ class TestInvalidPaymentCredential:
         
         challenge = create_challenge(
             amount=1.00,
-            recipient=mock_mpp_config.SERVER_ADDRESS,
+            recipient=mock_mpp_config.TEMPO_SERVER_ADDRESS,
             realm="video-gen-api",
             secret_key=mock_mpp_config.MPP_SECRET_KEY
         )
@@ -334,7 +334,7 @@ class TestReplayPrevention:
                     "id": credential_id,
                     "challenge": challenge,
                     "payload": {
-                        "transfer": {"recipient": mock_mpp_config.SERVER_ADDRESS, "amount": "1000000", "currency": "pathUSD"},
+                        "transfer": {"recipient": mock_mpp_config.TEMPO_SERVER_ADDRESS, "amount": "1000000", "currency": "pathUSD"},
                         "transaction_bytes": "0x" + "00" * 200
                     },
                     "type": "transaction"
@@ -604,7 +604,7 @@ class TestBroadcastIntegration:
                     "challenge": challenge,
                     "payload": {
                         "transfer": {
-                            "recipient": mock_mpp_config.SERVER_ADDRESS,
+                            "recipient": mock_mpp_config.TEMPO_SERVER_ADDRESS,
                             "amount": str(int(quote_sessions[session_id]["final_price_total"] * 1_000_000)),
                             "currency": "pathUSD"
                         },
@@ -655,7 +655,7 @@ class TestBroadcastIntegration:
                     "challenge": challenge,
                     "payload": {
                         "transfer": {
-                            "recipient": mock_mpp_config.SERVER_ADDRESS,
+                            "recipient": mock_mpp_config.TEMPO_SERVER_ADDRESS,
                             "amount": "1000000",
                             "currency": "pathUSD"
                         },
@@ -702,7 +702,7 @@ class TestBroadcastIntegration:
                     "challenge": challenge,
                     "payload": {
                         "transfer": {
-                            "recipient": mock_mpp_config.SERVER_ADDRESS,
+                            "recipient": mock_mpp_config.TEMPO_SERVER_ADDRESS,
                             "amount": "1000000",
                             "currency": "pathUSD"
                         },
@@ -750,7 +750,7 @@ class TestBroadcastErrorHandling:
             "challenge": challenge,
             "payload": {
                 "transfer": {
-                    "recipient": mock_mpp_config.SERVER_ADDRESS,
+                    "recipient": mock_mpp_config.TEMPO_SERVER_ADDRESS,
                     "amount": "1000000",
                     "currency": "pathUSD"
                 }

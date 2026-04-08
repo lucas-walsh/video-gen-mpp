@@ -529,8 +529,8 @@ class TestMPPConfig:
             mpp_secret_key="test"
         )
         
-        assert config.SERVER_ADDRESS.startswith("0x")
-        assert len(config.SERVER_ADDRESS) == 42
+        assert config.TEMPO_SERVER_ADDRESS.startswith("0x")
+        assert len(config.TEMPO_SERVER_ADDRESS) == 42
 
 
 class TestIntegrationChallengeAndCredential:

@@ -17,8 +17,8 @@ class MPPConfig:
     """Configuration for MPP on Tempo Network"""
 
     TEMPO_RPC_URL: str
-    SERVER_PRIVATE_KEY: str
-    SERVER_ADDRESS: str
+    TEMPO_SERVER_PRIVATE_KEY: str
+    TEMPO_SERVER_ADDRESS: str
     PATHUSD_ADDRESS: str
     MPP_SECRET_KEY: str
     CHAIN_ID: int
@@ -35,7 +35,7 @@ class MPPConfig:
             "TEMPO_RPC_URL", "https://rpc.testnet.tempo.xyz"
         )
 
-        self.SERVER_PRIVATE_KEY = server_private_key or os.getenv("SERVER_PRIVATE_KEY", "")
+        self.TEMPO_SERVER_PRIVATE_KEY = server_private_key or os.getenv("TEMPO_SERVER_PRIVATE_KEY", "")
 
         self.PATHUSD_ADDRESS = pathusd_address or os.getenv(
             "PATHUSD_ADDRESS", "0x20c0000000000000000000000000000000000000"
@@ -46,14 +46,14 @@ class MPPConfig:
         self.CHAIN_ID = chain_id or int(os.getenv("TEMPO_CHAIN_ID", "57059"))
 
         self._validate_config()
-        self.SERVER_ADDRESS = self._derive_address()
+        self.TEMPO_SERVER_ADDRESS = self._derive_address()
 
     def _derive_address(self) -> str:
         """Derive Ethereum address from private key."""
-        if not self.SERVER_PRIVATE_KEY:
+        if not self.TEMPO_SERVER_PRIVATE_KEY:
             return ""
 
-        key = self.SERVER_PRIVATE_KEY
+        key = self.TEMPO_SERVER_PRIVATE_KEY
         if key.startswith("0x"):
             key = key[2:]
 
@@ -65,8 +65,8 @@ class MPPConfig:
         if not self.TEMPO_RPC_URL:
             raise ValueError("TEMPO_RPC_URL is required")
 
-        if not self.SERVER_PRIVATE_KEY:
-            raise ValueError("SERVER_PRIVATE_KEY is required")
+        if not self.TEMPO_SERVER_PRIVATE_KEY:
+            raise ValueError("TEMPO_SERVER_PRIVATE_KEY is required")
 
         if not self.MPP_SECRET_KEY:
             raise ValueError("MPP_SECRET_KEY is required")
@@ -78,7 +78,7 @@ class MPPConfig:
         return (
             f"MPPConfig("
             f"rpc_url={self.TEMPO_RPC_URL}, "
-            f"address={self.SERVER_ADDRESS}, "
+            f"address={self.TEMPO_SERVER_ADDRESS}, "
             f"pathusd={self.PATHUSD_ADDRESS}, "
             f"chain_id={self.CHAIN_ID})"
         )

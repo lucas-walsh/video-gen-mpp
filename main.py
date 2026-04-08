@@ -311,7 +311,7 @@ async def generate_video(request):
             logger.info(f"Using mock transaction hash: {tx_hash}")
         else:
             mpp_config = get_mpp_config()
-            fee_payer_key = mpp_config.SERVER_PRIVATE_KEY
+            fee_payer_key = mpp_config.TEMPO_SERVER_PRIVATE_KEY
             
             sponsored_tx, sponsorship_error = add_fee_sponsorship(tx_bytes, fee_payer_key)
             if sponsorship_error:
@@ -433,7 +433,7 @@ async def generate_video(request):
     
     challenge = create_challenge(
         amount=final_price_total,
-        recipient=mpp_config.SERVER_ADDRESS,
+        recipient=mpp_config.TEMPO_SERVER_ADDRESS,
         realm="video-gen-api",
         method="tempo",
         currency="pathUSD",
@@ -458,7 +458,7 @@ async def generate_video(request):
     
     logger.info(
         f"Challenge generated: amount={final_price_total:.6f} USD, "
-        f"recipient={mpp_config.SERVER_ADDRESS}, "
+        f"recipient={mpp_config.TEMPO_SERVER_ADDRESS}, "
         f"expires_in={QUOTE_TTL_SECONDS}s, session_id={session_id}"
     )
 

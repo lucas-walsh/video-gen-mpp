@@ -20,6 +20,9 @@ import base64
 import logging
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+load_dotenv(".env.client")
 
 from eth_account import Account
 from eth_account.messages import encode_typed_data
@@ -567,7 +570,7 @@ def main():
         "--private-key",
         type=str,
         default=None,
-        help="Client private key (or set CLIENT_PRIVATE_KEY env var)"
+        help="Client private key (or set TEMPO_CLIENT_PRIVATE_KEY env var)"
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -580,13 +583,13 @@ def main():
     private_key = args.private_key
     if not private_key:
         import os
-        private_key = os.getenv("CLIENT_PRIVATE_KEY")
-    
+        private_key = os.getenv("TEMPO_CLIENT_PRIVATE_KEY")
+
     if not private_key:
-        print("Error: CLIENT_PRIVATE_KEY environment variable not set")
+        print("Error: TEMPO_CLIENT_PRIVATE_KEY environment variable not set")
         print("Please set it or use --private-key argument")
         print("\nUsage:")
-        print("  export CLIENT_PRIVATE_KEY='0x...'")
+        print("  export TEMPO_CLIENT_PRIVATE_KEY='0x...'")
         print("  python client-pay.py --prompt 'A cat playing piano'")
         return 1
     

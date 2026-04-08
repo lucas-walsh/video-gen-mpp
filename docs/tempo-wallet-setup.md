@@ -97,13 +97,13 @@ Once you have both wallets funded, update the environment files:
 **Server (`.env`)**:
 ```bash
 # Paste the server wallet's private key (hex, without 0x prefix)
-SERVER_PRIVATE_KEY=your_server_private_key_hex
+TEMPO_SERVER_PRIVATE_KEY=your_server_private_key_hex
 ```
 
 **Client (`.env.client`)**:
 ```bash
 # Paste the client wallet's private key (hex, without 0x prefix)
-CLIENT_PRIVATE_KEY=your_client_private_key_hex
+TEMPO_CLIENT_PRIVATE_KEY=your_client_private_key_hex
 ```
 
 ## 5. Verify connectivity
