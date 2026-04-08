@@ -191,9 +191,13 @@ video-gen-mpp/
 └── .env.client          # Client environment template
 ```
 
+<!-- TODO: Verify faucet URL, block explorer URL, and native token symbol against live Tempo docs -->
+## Tempo wallet setup
+
+New to Tempo? See [docs/tempo-wallet-setup.md](docs/tempo-wallet-setup.md) for a walkthrough of creating wallets, configuring MetaMask, funding with testnet pathUSD, and verifying connectivity.
+
 ## Further reading
 
-- [Tempo wallet setup guide](docs/tempo-wallet-setup.md)
 - [MPP specification](https://paymentauth.org)
 - [Tempo documentation](https://tempo.xyz/docs)
 - [FAL AI documentation](https://fal.ai/docs)
