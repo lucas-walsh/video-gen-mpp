@@ -188,7 +188,7 @@ video-gen-mpp/
 ├── docs/                # Documentation
 │   └── tempo-wallet-setup.md  # Wallet setup guide
 ├── .env.example         # Server environment template
-└── .env.client          # Client environment template
+└── .env.client.example  # Client environment template
 ```
 
 <!-- TODO: Verify faucet URL, block explorer URL, and native token symbol against live Tempo docs -->
