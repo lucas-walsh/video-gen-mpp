@@ -2,6 +2,16 @@
 
 This guide walks through setting up two Tempo testnet wallets (one for the server, one for the client) and funding them with pathUSD tokens.
 
+## Quick Start (automated)
+
+The fastest way to set up wallets is the automated script:
+
+```bash
+python scripts/setup_wallets.py
+```
+
+This generates server + client wallets, funds them via the Moderato faucet, and writes `.env` / `.env.client` files. See below for the manual approach.
+
 ## Overview
 
 You need two wallets:
@@ -48,10 +58,10 @@ If you prefer a browser wallet for managing tokens:
 | Field | Value |
 |-------|-------|
 | Network Name | Tempo Testnet |
-| RPC URL | `https://rpc.testnet.tempo.xyz` |
-| Chain ID | `57059` |
+| RPC URL | `https://rpc.moderato.tempo.xyz` |
+| Chain ID | `42431` |
 | Currency Symbol | `TEMPO` |
-| Block Explorer URL | `https://explorer.testnet.tempo.xyz` |
+| Block Explorer URL | `https://explore.tempo.xyz` |
 
 4. Click "Save"
 
@@ -63,12 +73,15 @@ If you prefer a browser wallet for managing tokens:
 
 The server wallet needs a small amount of native TEMPO tokens to sponsor transaction fees.
 
-Check the [Tempo Discord](https://discord.gg/tempo) or [Tempo documentation](https://tempo.xyz/docs) for the current testnet faucet. Typical faucet patterns:
+The Moderato testnet faucet is an RPC method. Call `tempo_fundAddress` to receive 1M of each testnet stablecoin:
 
-- Web faucet at `https://faucet.testnet.tempo.xyz`
-- Discord bot command (e.g., `!faucet <address>`)
+```bash
+curl -s -X POST https://rpc.moderato.tempo.xyz \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tempo_fundAddress","params":["YOUR_ADDRESS"],"id":1}'
+```
 
-<!-- TODO: Update with verified faucet URL once confirmed -->
+Or use the automated setup script: `python scripts/setup_wallets.py`
 
 ### Get pathUSD tokens (for the client wallet)
 
@@ -76,9 +89,7 @@ The client wallet needs pathUSD (TIP-20 stablecoin) to pay for video generation.
 
 **pathUSD contract address**: `0x20c0000000000000000000000000000000000000`
 
-Check Tempo's testnet faucet or documentation for how to obtain testnet pathUSD. Some testnet faucets distribute both native tokens and common test tokens. If pathUSD is not available from a faucet, you may need to mint test tokens via the contract directly.
-
-<!-- TODO: Update with verified pathUSD faucet steps once confirmed -->
+The `tempo_fundAddress` RPC call (above) distributes testnet pathUSD along with other stablecoins. No separate step is needed.
 
 ### Add pathUSD to MetaMask (optional)
 
@@ -112,7 +123,7 @@ Check that the RPC endpoint is reachable and your wallets are funded:
 
 ```bash
 # Check RPC connectivity
-curl -s -X POST https://rpc.testnet.tempo.xyz \
+curl -s -X POST https://rpc.moderato.tempo.xyz \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' | python3 -m json.tool
 ```
@@ -122,15 +133,15 @@ Expected response:
 {
     "jsonrpc": "2.0",
     "id": 1,
-    "result": "0xdef3"
+    "result": "0xa5bf"
 }
 ```
 
-(`0xdef3` = 57059 in decimal, confirming Tempo testnet)
+(`0xa5bf` = 42431 in decimal, confirming Tempo Moderato testnet)
 
 ```bash
 # Check native balance (replace ADDRESS with your server wallet address)
-curl -s -X POST https://rpc.testnet.tempo.xyz \
+curl -s -X POST https://rpc.moderato.tempo.xyz \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_getBalance","params":["ADDRESS","latest"],"id":1}' | python3 -m json.tool
 ```
@@ -139,8 +150,8 @@ curl -s -X POST https://rpc.testnet.tempo.xyz \
 
 | Item | Value |
 |------|-------|
-| Chain ID | `57059` |
-| RPC URL | `https://rpc.testnet.tempo.xyz` |
+| Chain ID | `42431` |
+| RPC URL | `https://rpc.moderato.tempo.xyz` |
 | pathUSD contract | `0x20c0000000000000000000000000000000000000` |
 | Transaction type | `0x76` (Tempo custom) |
 | Client signing domain | `0x76` |
@@ -148,8 +159,8 @@ curl -s -X POST https://rpc.testnet.tempo.xyz \
 
 ## Troubleshooting
 
-**"Invalid chain ID" errors**: Make sure both `.env` and `.env.client` have `TEMPO_CHAIN_ID=57059`.
+**"Invalid chain ID" errors**: Make sure both `.env` and `.env.client` have `TEMPO_CHAIN_ID=42431`.
 
 **"Insufficient funds" errors**: Verify the client wallet has enough pathUSD for the requested video. Check balance via MetaMask or the RPC `eth_getBalance` call above.
 
-**RPC connection failures**: The Tempo testnet RPC may have rate limits or occasional downtime. If `https://rpc.testnet.tempo.xyz` is unreachable, check the [Tempo status page](https://tempo.xyz) or Discord for alternative endpoints.
+**RPC connection failures**: The Tempo Moderato testnet RPC may have rate limits or occasional downtime. If `https://rpc.moderato.tempo.xyz` is unreachable, check the [Tempo status page](https://tempo.xyz) or Discord for alternative endpoints.
