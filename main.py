@@ -27,7 +27,7 @@ from mpp.broadcast import (
     create_receipt,
     format_receipt_header,
 )
-from mpp.rpc import MockRPCClient
+from mpp.rpc import MockRPCClient, HTTPRPCClient
 from asyncio import Lock
 
 os.environ["FAL_KEY"] = FAL_AI_KEY
@@ -59,7 +59,15 @@ last_poll_time = {}
 POLL_CACHE_SECONDS = 5
 jobs_lock = Lock()
 used_credentials = set()
-rpc_client = MockRPCClient()
+
+use_mock = os.getenv("USE_MOCK_RPC", "false").lower() == "true"
+if use_mock:
+    rpc_client = MockRPCClient()
+    logger.info("Using MockRPCClient (USE_MOCK_RPC=true)")
+else:
+    mpp_cfg = get_mpp_config()
+    rpc_client = HTTPRPCClient(rpc_url=mpp_cfg.TEMPO_RPC_URL)
+    logger.info(f"Using HTTPRPCClient: {mpp_cfg.TEMPO_RPC_URL}")
 
 
 def cleanup_expired_sessions():

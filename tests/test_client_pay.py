@@ -23,11 +23,12 @@ from eth_hash.auto import keccak
 from eth_hash.auto import keccak
 
 test_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, test_dir)
+project_root = os.path.dirname(test_dir)
+sys.path.insert(0, project_root)
 
 spec = importlib.util.spec_from_file_location(
     "client_pay",
-    os.path.join(test_dir, "client-pay.py")
+    os.path.join(project_root, "client-pay.py")
 )
 client_pay = importlib.util.module_from_spec(spec)  # type: ignore
 spec.loader.exec_module(client_pay)  # type: ignore
@@ -155,11 +156,11 @@ class TestTIP20TransactionCreation:
             amount=amount,
             sender_address=sender,
             nonce=0,
-            chain_id=57059,
+            chain_id=42431,
         )
         
         assert transaction["type"] == "0x76"
-        assert transaction["chainId"] == 57059
+        assert transaction["chainId"] == 42431
         assert transaction["nonce"] == 0
         assert transaction["to"] == PATHUSD_ADDRESS
         assert transaction["value"] == "0x0"
@@ -195,7 +196,7 @@ class TestTransactionSigning:
         encode_transaction_for_signing = client_pay.encode_transaction_for_signing
         
         transaction = {
-            "chainId": 57059,
+            "chainId": 42431,
             "nonce": 0,
             "to": "0x20c0000000000000000000000000000000000000",
             "value": "0x0",

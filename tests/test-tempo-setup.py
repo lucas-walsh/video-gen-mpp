@@ -16,9 +16,9 @@ import os
 
 os.environ["TEMPO_SERVER_PRIVATE_KEY"] = "0x" + "01" * 32
 os.environ["MPP_SECRET_KEY"] = "test-secret-key-for-hmac"
-os.environ["TEMPO_RPC_URL"] = "https://rpc.testnet.tempo.xyz"
+os.environ["TEMPO_RPC_URL"] = "https://rpc.moderato.tempo.xyz"
 os.environ["PATHUSD_ADDRESS"] = "0x20c0000000000000000000000000000000000000"
-os.environ["TEMPO_CHAIN_ID"] = "57059"
+os.environ["TEMPO_CHAIN_ID"] = "42431"
 
 
 def print_section(title: str) -> None:
@@ -217,7 +217,7 @@ def test_mock_rpc_chain_id() -> bool:
         assert response.result is not None, "No result from RPC call"
 
         chain_id = int(response.result, 16)
-        assert chain_id == 57059, f"Chain ID should be 57059, got {chain_id}"
+        assert chain_id == 42431, f"Chain ID should be 42431, got {chain_id}"
 
         print("\n✓ Chain ID query PASSED")
         return True

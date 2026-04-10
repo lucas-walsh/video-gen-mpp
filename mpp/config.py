@@ -32,7 +32,7 @@ class MPPConfig:
         chain_id: Optional[int] = None,
     ):
         self.TEMPO_RPC_URL = tempo_rpc_url or os.getenv(
-            "TEMPO_RPC_URL", "https://rpc.testnet.tempo.xyz"
+            "TEMPO_RPC_URL", "https://rpc.moderato.tempo.xyz"
         )
 
         self.TEMPO_SERVER_PRIVATE_KEY = server_private_key or os.getenv("TEMPO_SERVER_PRIVATE_KEY", "")
@@ -43,7 +43,7 @@ class MPPConfig:
 
         self.MPP_SECRET_KEY = mpp_secret_key or os.getenv("MPP_SECRET_KEY", "")
 
-        self.CHAIN_ID = chain_id or int(os.getenv("TEMPO_CHAIN_ID", "57059"))
+        self.CHAIN_ID = chain_id or int(os.getenv("TEMPO_CHAIN_ID", "42431"))
 
         self._validate_config()
         self.TEMPO_SERVER_ADDRESS = self._derive_address()

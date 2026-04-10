@@ -79,7 +79,7 @@ def create_tempo_transaction(
     amount: str,
     sender_address: str,
     nonce: int = 0,
-    chain_id: int = 57059,
+    chain_id: int = 42431,
     valid_before: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
@@ -90,7 +90,7 @@ def create_tempo_transaction(
         amount: Amount in micro USD
         sender_address: Sender (fee payer) address
         nonce: Transaction nonce
-        chain_id: Chain ID (default: 57059 for Tempo testnet)
+        chain_id: Chain ID (default: 42431 for Tempo Moderato testnet)
         valid_before: Optional validity timestamp
         
     Returns:
@@ -215,7 +215,7 @@ def create_signed_transaction_bytes(
         from eth_account.typed_transactions import TypedTransaction
         
         tx_dict = {
-            "chainId": transaction.get("chainId", 57059),
+            "chainId": transaction.get("chainId", 42431),
             "nonce": transaction.get("nonce", 0),
             "to": transaction.get("to", ""),
             "value": int(transaction.get("value", "0x0"), 16),
@@ -457,7 +457,7 @@ def run_payment_flow(
         amount=amount_micro_usd,
         sender_address=sender_address,
         nonce=nonce,
-        chain_id=57059,
+        chain_id=42431,
     )
     
     print(f"  To: {transaction['to']}")

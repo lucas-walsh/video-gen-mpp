@@ -490,7 +490,7 @@ class TestMockRPCClient:
     async def test_mock_client_get_chain_id(self):
         client = MockRPCClient()
         chain_id = await client.get_chain_id()
-        assert chain_id == 57059
+        assert chain_id == 42431
         
     @pytest.mark.asyncio
     async def test_mock_client_call_method(self):
@@ -516,11 +516,12 @@ class TestMPPConfig:
             tempo_rpc_url="https://test.rpc",
             server_private_key="0x" + "01" * 32,
             pathusd_address="0x20c0000000000000000000000000000000000000",
-            mpp_secret_key="test_secret"
+            mpp_secret_key="test_secret",
+            chain_id=42431,
         )
-        
+
         assert config.TEMPO_RPC_URL == "https://test.rpc"
-        assert config.CHAIN_ID == 57059
+        assert config.CHAIN_ID == 42431
         
     def test_config_derives_address(self):
         config = MPPConfig(

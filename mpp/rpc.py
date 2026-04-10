@@ -136,6 +136,60 @@ class RPCClientInterface(ABC):
         pass
 
 
+class HTTPRPCClient(RPCClientInterface):
+    """
+    Real HTTP JSON-RPC client backed by web3.py.
+    Connects to a live Tempo RPC endpoint.
+    """
+
+    def __init__(self, rpc_url: str = "https://rpc.moderato.tempo.xyz"):
+        from web3 import Web3
+        self.rpc_url = rpc_url
+        self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+
+    async def call(self, method: str, params: List[Any]) -> RPCResponse:
+        """Make a JSON-RPC call via web3's provider."""
+        try:
+            result = self.w3.provider.make_request(method, params)
+            if "error" in result:
+                return RPCResponse(error=result["error"])
+            return RPCResponse(result=result.get("result"))
+        except Exception as e:
+            return RPCResponse(error={"code": -32000, "message": str(e)})
+
+    async def get_balance(self, address: str, block: str = "latest") -> int:
+        return self.w3.eth.get_balance(address)
+
+    async def send_raw_transaction(self, tx_bytes: str) -> str:
+        if isinstance(tx_bytes, str):
+            tx_bytes = bytes.fromhex(tx_bytes.removeprefix("0x"))
+        tx_hash = self.w3.eth.send_raw_transaction(tx_bytes)
+        return tx_hash.hex() if not isinstance(tx_hash, str) else tx_hash
+
+    async def get_transaction(self, tx_hash: str) -> Optional[Dict[str, Any]]:
+        try:
+            tx = self.w3.eth.get_transaction(tx_hash)
+            return dict(tx)
+        except Exception:
+            return None
+
+    async def get_transaction_receipt(self, tx_hash: str) -> Optional[Dict[str, Any]]:
+        try:
+            receipt = self.w3.eth.get_transaction_receipt(tx_hash)
+            return dict(receipt)
+        except Exception:
+            return None
+
+    async def get_chain_id(self) -> int:
+        return self.w3.eth.chain_id
+
+    async def get_block_number(self) -> int:
+        return self.w3.eth.block_number
+
+    def __repr__(self) -> str:
+        return f"HTTPRPCClient(rpc_url={self.rpc_url})"
+
+
 class MockRPCClient(RPCClientInterface):
     """
     Mock RPC client for testing.
@@ -144,7 +198,7 @@ class MockRPCClient(RPCClientInterface):
     Maintains in-memory state for accounts and transactions.
     """
     
-    def __init__(self, rpc_url: str = "https://rpc.testnet.tempo.xyz"):
+    def __init__(self, rpc_url: str = "https://rpc.moderato.tempo.xyz"):
         """
         Initialize mock RPC client.
         
@@ -156,7 +210,7 @@ class MockRPCClient(RPCClientInterface):
         self._transactions: Dict[str, Dict[str, Any]] = {}
         self._receipts: Dict[str, Dict[str, Any]] = {}
         self._block_number = 1000000
-        self._chain_id = 57059
+        self._chain_id = 42431
         self._nonces: Dict[str, int] = {}
         
         self._default_balance = 10 ** 18

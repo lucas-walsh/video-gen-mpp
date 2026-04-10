@@ -45,7 +45,7 @@ def decode_transaction_bytes(tx_bytes: bytes) -> Optional[Dict[str, Any]]:
             'data': '0x' + tx_bytes.hex() if tx_bytes else '0x',
             'nonce': 0,
             'value': 0,
-            'chainId': 57059,
+            'chainId': 42431,
             'gas': 21000,
         }
         

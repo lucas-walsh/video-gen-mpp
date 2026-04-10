@@ -71,15 +71,33 @@ Pricing is fetched dynamically from FAL AI with a 20% server markup.
 
 If you haven't set up Tempo wallets yet, see [docs/tempo-wallet-setup.md](docs/tempo-wallet-setup.md) for a step-by-step guide.
 
-## Setup
+## Quick Start
 
 ```bash
-# Clone and install dependencies
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Set up wallets (generates keys, funds via Moderato faucet, writes .env files)
+python scripts/setup_wallets.py
+
+# 3. Edit .env and add your FAL AI key
+#    FAL_AI_KEY=your_key_here
+
+# 4. Start the server
+python main.py
+
+# 5. Run the client
+python client-pay.py --prompt "A cat playing piano" --duration 5
+```
+
+## Setup (manual)
+
+If you prefer to set up wallets manually, see [docs/tempo-wallet-setup.md](docs/tempo-wallet-setup.md).
+
+```bash
 git clone <repo-url>
 cd video-gen-mpp
 pip install -r requirements.txt
-
-# Copy and configure environment
 cp .env.example .env
 # Edit .env with your server keys and FAL API key (see comments in file)
 ```
@@ -184,6 +202,8 @@ video-gen-mpp/
 │   ├── broadcast.py     # Fee sponsorship and transaction broadcasting
 │   ├── rpc.py           # RPC client interface (abstract + mock)
 │   └── config.py        # MPP configuration (keys, addresses, chain ID)
+├── scripts/
+│   └── setup_wallets.py # Automated wallet setup + faucet funding
 ├── tests/               # Test suite (see tests/README.md)
 ├── docs/                # Documentation
 │   └── tempo-wallet-setup.md  # Wallet setup guide
@@ -191,10 +211,9 @@ video-gen-mpp/
 └── .env.client.example  # Client environment template
 ```
 
-<!-- TODO: Verify faucet URL, block explorer URL, and native token symbol against live Tempo docs -->
 ## Tempo wallet setup
 
-New to Tempo? See [docs/tempo-wallet-setup.md](docs/tempo-wallet-setup.md) for a walkthrough of creating wallets, configuring MetaMask, funding with testnet pathUSD, and verifying connectivity.
+New to Tempo? The quickest path is `python scripts/setup_wallets.py`. For a manual walkthrough, see [docs/tempo-wallet-setup.md](docs/tempo-wallet-setup.md).
 
 ## Further reading
 
